@@ -90,7 +90,7 @@ discordClient.on('interactionCreate', async (interaction) => {
     
     // Close the lobby
     io.to(code).emit('lobbyClosed', { reason: 'Host closed the lobby via Discord' });
-    deleteLobby(code);
+    await deleteLobby(code);
     io.emit('lobbiesUpdate', getPublicLobbies());
     
     await interaction.reply({ content: `✅ Lobby **${code}** has been closed.`, ephemeral: true });
@@ -133,31 +133,45 @@ async function updatePlayerRankRole(odiscordId, newRank) {
 // ===========================================
 
 async function createLobbyVoiceChannels(lobbyId) {
-  if (!discordClient.isReady()) return null;
+  console.log('Creating lobby VC for:', lobbyId);
+  
+  if (!discordClient.isReady()) {
+    console.log('Discord client not ready');
+    return null;
+  }
   
   try {
     const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-    if (!guild) return null;
+    if (!guild) {
+      console.log('Guild not found:', CONFIG.GUILD_ID);
+      return null;
+    }
+    
+    console.log('Guild found:', guild.name);
     
     const category = CONFIG.VOICE_CATEGORY_ID ? 
       guild.channels.cache.get(CONFIG.VOICE_CATEGORY_ID) : null;
+    
+    if (CONFIG.VOICE_CATEGORY_ID && !category) {
+      console.log('Category not found:', CONFIG.VOICE_CATEGORY_ID);
+    }
     
     // Create lobby VC (waiting room)
     const lobbyVC = await guild.channels.create({
       name: `🎮 Lobby ${lobbyId}`,
       type: ChannelType.GuildVoice,
-      parent: category?.id,
+      parent: category?.id || null,
       userLimit: 10
     });
     
-    console.log(`Created lobby VC: ${lobbyVC.name}`);
+    console.log(`Created lobby VC: ${lobbyVC.name} (${lobbyVC.id})`);
     
     return {
       lobbyVCId: lobbyVC.id,
       lobbyVCName: lobbyVC.name
     };
   } catch (e) {
-    console.error('Error creating lobby voice channels:', e);
+    console.error('Error creating lobby voice channels:', e.message);
     return null;
   }
 }
@@ -475,9 +489,12 @@ function getLobby(code) {
   return lobbies.get(code?.toUpperCase()) || null;
 }
 
-function deleteLobby(code) {
+async function deleteLobby(code) {
   const lobby = lobbies.get(code);
   if (lobby) {
+    // Move all players to main VC
+    await moveAllPlayersToMainVC(lobby);
+    
     // Delete voice channels
     deleteVoiceChannel(lobby.lobbyVCId);
     deleteVoiceChannel(lobby.team1VCId);
@@ -486,6 +503,27 @@ function deleteLobby(code) {
     db.clearLobbySession(code);
     lobbies.delete(code);
     console.log(`Lobby ${code} deleted`);
+  }
+}
+
+// Helper to move ALL players (not just teams) to main VC
+async function moveAllPlayersToMainVC(lobby) {
+  if (!discordClient.isReady()) return;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    
+    for (const player of lobby.players) {
+      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
+      if (member && member.voice?.channel) {
+        await member.voice.setChannel(CONFIG.MAIN_VC_ID).catch(e => console.error('Move error:', e));
+      }
+    }
+    
+    console.log(`Moved all players to main VC for lobby ${lobby.id}`);
+  } catch (e) {
+    console.error('Error moving players to main VC:', e);
   }
 }
 
@@ -987,9 +1025,9 @@ io.on('connection', (socket) => {
     io.to(lobby.id).emit('lobbyUpdate', lobby);
     
     // Close the lobby on the website
-    setTimeout(() => {
+    setTimeout(async () => {
       io.to(lobby.id).emit('lobbyClosed', { reason: 'Match complete! Thanks for playing.' });
-      deleteLobby(lobby.id);
+      await deleteLobby(lobby.id);
     }, 5000); // 5 second delay so players can see the results
   }
 
@@ -1018,7 +1056,7 @@ io.on('connection', (socket) => {
     io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
-  socket.on('leaveLobby', ({ lobbyId }) => {
+  socket.on('leaveLobby', async ({ lobbyId }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) return;
@@ -1030,7 +1068,7 @@ io.on('connection', (socket) => {
 
     if (socket.odiscordId === lobby.host.odiscordId) {
       io.to(lobbyId).emit('lobbyClosed', { reason: 'Host left the lobby' });
-      deleteLobby(lobbyId);
+      await deleteLobby(lobbyId);
       io.emit('lobbiesUpdate', getPublicLobbies());
       return;
     }
@@ -1071,7 +1109,7 @@ io.on('connection', (socket) => {
     io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
-  socket.on('closeLobby', ({ lobbyId }) => {
+  socket.on('closeLobby', async ({ lobbyId }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) return;
@@ -1082,7 +1120,7 @@ io.on('connection', (socket) => {
     }
 
     io.to(lobbyId).emit('lobbyClosed', { reason: 'Host closed the lobby' });
-    deleteLobby(lobbyId);
+    await deleteLobby(lobbyId);
     io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
