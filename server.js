@@ -588,25 +588,9 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (lobby.phase !== 'waiting') {
-      const existingPlayer = lobby.players.find(p => p.odiscordId === userData.odiscordId);
-      if (existingPlayer) {
-        socket.join(lobby.id);
-        socket.lobbyId = lobby.id;
-        socket.odiscordId = userData.odiscordId;
-        socket.emit('lobbyJoined', lobby);
-        return;
-      }
-      socket.emit('error', { message: 'Game already in progress' });
-      return;
-    }
-
-    if (lobby.players.length >= lobby.maxPlayers) {
-      socket.emit('error', { message: 'Lobby is full' });
-      return;
-    }
-
-    if (lobby.players.find(p => p.odiscordId === userData.odiscordId)) {
+    // Check if player is already in this lobby (allow rejoin even if full or in progress)
+    const existingPlayer = lobby.players.find(p => p.odiscordId === userData.odiscordId);
+    if (existingPlayer) {
       socket.join(lobby.id);
       socket.lobbyId = lobby.id;
       socket.odiscordId = userData.odiscordId;
@@ -615,6 +599,18 @@ io.on('connection', (socket) => {
       if (lobby.lobbyVCId) {
         movePlayerToLobbyVC(userData.odiscordId, lobby.lobbyVCId);
       }
+      return;
+    }
+
+    // New players can't join if game already started
+    if (lobby.phase !== 'waiting') {
+      socket.emit('error', { message: 'Game already in progress' });
+      return;
+    }
+
+    // New players can't join if lobby is full
+    if (lobby.players.length >= lobby.maxPlayers) {
+      socket.emit('error', { message: 'Lobby is full' });
       return;
     }
 
@@ -726,6 +722,40 @@ io.on('connection', (socket) => {
       lobby.currentTurn = 'team1';
       lobby.picksLeft = 1;
     }
+
+    io.to(lobby.id).emit('lobbyUpdate', lobby);
+  });
+
+  socket.on('removeCaptain', ({ lobbyId, odiscordId }) => {
+    const lobby = getLobby(lobbyId);
+    
+    if (!lobby) {
+      socket.emit('error', { message: 'Lobby not found' });
+      return;
+    }
+
+    if (socket.odiscordId !== lobby.host.odiscordId) {
+      socket.emit('error', { message: 'Only the host can remove captains' });
+      return;
+    }
+
+    if (lobby.phase !== 'captain-select') {
+      socket.emit('error', { message: 'Can only remove captains during captain select' });
+      return;
+    }
+
+    const captainIndex = lobby.captains.findIndex(c => c.odiscordId === odiscordId);
+    if (captainIndex === -1) {
+      socket.emit('error', { message: 'Player is not a captain' });
+      return;
+    }
+
+    // Remove from captains
+    lobby.captains.splice(captainIndex, 1);
+    
+    // Remove from teams
+    lobby.teams.team1 = lobby.teams.team1.filter(p => p.odiscordId !== odiscordId);
+    lobby.teams.team2 = lobby.teams.team2.filter(p => p.odiscordId !== odiscordId);
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
