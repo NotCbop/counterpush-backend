@@ -261,11 +261,11 @@ async function movePlayersToTeamVCs(lobby) {
 }
 
 // ===========================================
-// HELPER: Move players back to lobby VC
+// HELPER: Move players to main VC (after game ends)
 // ===========================================
 
-async function movePlayersToLobbyVC(lobby) {
-  if (!discordClient.isReady() || !lobby.lobbyVCId) return;
+async function movePlayersToMainVC(lobby) {
+  if (!discordClient.isReady()) return;
   
   try {
     const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
@@ -276,13 +276,34 @@ async function movePlayersToLobbyVC(lobby) {
     for (const player of allPlayers) {
       const member = await guild.members.fetch(player.odiscordId).catch(() => null);
       if (member && member.voice?.channel) {
-        await member.voice.setChannel(lobby.lobbyVCId).catch(e => console.error('Move error:', e));
+        await member.voice.setChannel(CONFIG.MAIN_VC_ID).catch(e => console.error('Move error:', e));
       }
     }
     
-    console.log(`Moved players back to lobby VC for lobby ${lobby.id}`);
+    console.log(`Moved players to main VC after game ${lobby.id}`);
   } catch (e) {
-    console.error('Error moving players back:', e);
+    console.error('Error moving players to main VC:', e);
+  }
+}
+
+// ===========================================
+// HELPER: Move player from main VC to lobby VC
+// ===========================================
+
+async function movePlayerToLobbyVC(odiscordId, lobbyVCId) {
+  if (!discordClient.isReady() || !lobbyVCId) return;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    
+    const member = await guild.members.fetch(odiscordId).catch(() => null);
+    if (member && member.voice?.channelId === CONFIG.MAIN_VC_ID) {
+      await member.voice.setChannel(lobbyVCId).catch(e => console.error('Move error:', e));
+      console.log(`Moved ${member.user.username} to lobby VC`);
+    }
+  } catch (e) {
+    console.error('Error moving player to lobby VC:', e);
   }
 }
 
@@ -525,6 +546,8 @@ io.on('connection', (socket) => {
       if (vcData) {
         lobby.lobbyVCId = vcData.lobbyVCId;
         lobby.lobbyVCName = vcData.lobbyVCName;
+        // Move host from main VC to lobby VC
+        movePlayerToLobbyVC(userData.odiscordId, lobby.lobbyVCId);
       }
     }
     
@@ -570,6 +593,10 @@ io.on('connection', (socket) => {
       socket.lobbyId = lobby.id;
       socket.odiscordId = userData.odiscordId;
       socket.emit('lobbyJoined', lobby);
+      // Move player from main VC to lobby VC if applicable
+      if (lobby.lobbyVCId) {
+        movePlayerToLobbyVC(userData.odiscordId, lobby.lobbyVCId);
+      }
       return;
     }
 
@@ -581,6 +608,11 @@ io.on('connection', (socket) => {
     socket.join(lobby.id);
     socket.lobbyId = lobby.id;
     socket.odiscordId = userData.odiscordId;
+
+    // Move player from main VC to lobby VC if applicable
+    if (lobby.lobbyVCId) {
+      movePlayerToLobbyVC(userData.odiscordId, lobby.lobbyVCId);
+    }
 
     socket.emit('lobbyJoined', lobby);
     io.to(lobby.id).emit('lobbyUpdate', lobby);
@@ -680,7 +712,7 @@ io.on('connection', (socket) => {
     io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
 
-  socket.on('draftPick', ({ lobbyId, odiscordId }) => {
+  socket.on('draftPick', async ({ lobbyId, odiscordId }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) {
@@ -719,7 +751,8 @@ io.on('connection', (socket) => {
     const playersPerTeam = lobby.maxPlayers / 2;
 
     if (totalPicked >= lobby.maxPlayers) {
-      startPlaying(lobby);
+      await startPlaying(lobby);
+      io.to(lobby.id).emit('lobbyUpdate', lobby);
     } else {
       if (lobby.picksLeft === 0) {
         lobby.currentTurn = lobby.currentTurn === 'team1' ? 'team2' : 'team1';
@@ -735,12 +768,15 @@ io.on('connection', (socket) => {
         }
         
         if (lobby.picksLeft === 0) {
-          startPlaying(lobby);
+          await startPlaying(lobby);
+          io.to(lobby.id).emit('lobbyUpdate', lobby);
+        } else {
+          io.to(lobby.id).emit('lobbyUpdate', lobby);
         }
+      } else {
+        io.to(lobby.id).emit('lobbyUpdate', lobby);
       }
     }
-
-    io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
 
   async function startPlaying(lobby) {
@@ -756,6 +792,10 @@ io.on('connection', (socket) => {
     
     // Move players to team VCs
     await movePlayersToTeamVCs(lobby);
+    
+    // Delete lobby VC (no longer needed)
+    await deleteVoiceChannel(lobby.lobbyVCId);
+    lobby.lobbyVCId = null;
   }
 
   socket.on('addScore', ({ lobbyId, team }) => {
@@ -834,17 +874,24 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Move players back to lobby VC
-    await movePlayersToLobbyVC(lobby);
+    // Send result to Discord first (before deleting lobby)
+    await sendMatchResultToDiscord(lobby, results);
+
+    // Move all players to main VC
+    await movePlayersToMainVC(lobby);
     
     // Delete team VCs
     await deleteVoiceChannel(lobby.team1VCId);
     await deleteVoiceChannel(lobby.team2VCId);
-    lobby.team1VCId = null;
-    lobby.team2VCId = null;
 
-    // Send result to Discord
-    sendMatchResultToDiscord(lobby, results);
+    // Emit final update before deleting
+    io.to(lobby.id).emit('lobbyUpdate', lobby);
+    
+    // Close the lobby on the website
+    setTimeout(() => {
+      io.to(lobby.id).emit('lobbyClosed', { reason: 'Match complete! Thanks for playing.' });
+      deleteLobby(lobby.id);
+    }, 5000); // 5 second delay so players can see the results
   }
 
   socket.on('resetLobby', ({ lobbyId }) => {
