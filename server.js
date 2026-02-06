@@ -42,8 +42,59 @@ const discordClient = new Client({
   ]
 });
 
-discordClient.once('ready', () => {
+discordClient.once('ready', async () => {
   console.log(`Discord bot logged in as ${discordClient.user.tag}`);
+  
+  // Register slash commands
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (guild) {
+      await guild.commands.create({
+        name: 'closelobby',
+        description: 'Close a lobby you are hosting',
+        options: [
+          {
+            name: 'code',
+            description: 'The lobby code',
+            type: 3, // STRING
+            required: true
+          }
+        ]
+      });
+      console.log('Slash commands registered');
+    }
+  } catch (e) {
+    console.error('Error registering slash commands:', e);
+  }
+});
+
+// Handle slash commands
+discordClient.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  
+  if (interaction.commandName === 'closelobby') {
+    const code = interaction.options.getString('code').toUpperCase();
+    const odiscordId = interaction.user.id;
+    
+    const lobby = lobbies.get(code);
+    
+    if (!lobby) {
+      await interaction.reply({ content: '❌ Lobby not found.', ephemeral: true });
+      return;
+    }
+    
+    if (lobby.host.odiscordId !== odiscordId) {
+      await interaction.reply({ content: '❌ You are not the host of this lobby.', ephemeral: true });
+      return;
+    }
+    
+    // Close the lobby
+    io.to(code).emit('lobbyClosed', { reason: 'Host closed the lobby via Discord' });
+    deleteLobby(code);
+    io.emit('lobbiesUpdate', getPublicLobbies());
+    
+    await interaction.reply({ content: `✅ Lobby **${code}** has been closed.`, ephemeral: true });
+  }
 });
 
 // ===========================================
