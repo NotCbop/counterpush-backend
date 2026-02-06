@@ -1007,18 +1007,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    
-    // Check if this user was a host of any lobby
-    if (socket.odiscordId && socket.lobbyId) {
-      const lobby = getLobby(socket.lobbyId);
-      if (lobby && lobby.host.odiscordId === socket.odiscordId) {
-        // Host disconnected - close the lobby
-        console.log(`Host disconnected, closing lobby ${socket.lobbyId}`);
-        io.to(socket.lobbyId).emit('lobbyClosed', { reason: 'Host disconnected' });
-        deleteLobby(socket.lobbyId);
-        io.emit('lobbiesUpdate', getPublicLobbies());
-      }
-    }
   });
 });
 
