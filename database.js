@@ -4,6 +4,7 @@ const CONFIG = require('./config');
 
 const DB_PATH = path.join(__dirname, 'data', 'players.json');
 const SESSIONS_PATH = path.join(__dirname, 'data', 'sessions.json');
+const MATCHES_PATH = path.join(__dirname, 'data', 'matches.json');
 
 // Ensure data directory exists
 const dataDir = path.join(__dirname, 'data');
@@ -87,6 +88,64 @@ function clearLobbySession(lobbyId) {
 }
 
 // ===========================================
+// MATCH HISTORY
+// ===========================================
+
+function loadMatches() {
+  try {
+    if (fs.existsSync(MATCHES_PATH)) {
+      const data = fs.readFileSync(MATCHES_PATH, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (error) {
+    console.error('Error loading matches:', error);
+  }
+  return [];
+}
+
+function saveMatches(data) {
+  try {
+    fs.writeFileSync(MATCHES_PATH, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('Error saving matches:', error);
+  }
+}
+
+function saveMatch(matchData) {
+  const matches = loadMatches();
+  const match = {
+    id: `M${Date.now()}`,
+    timestamp: Date.now(),
+    date: new Date().toISOString(),
+    ...matchData
+  };
+  matches.unshift(match); // Add to beginning (newest first)
+  
+  // Keep only last 1000 matches
+  if (matches.length > 1000) {
+    matches.pop();
+  }
+  
+  saveMatches(matches);
+  return match;
+}
+
+function getPlayerMatches(odiscordId, limit = 10) {
+  const matches = loadMatches();
+  return matches
+    .filter(m => 
+      m.winners?.some(p => p.odiscordId === odiscordId) ||
+      m.losers?.some(p => p.odiscordId === odiscordId)
+    )
+    .slice(0, limit);
+}
+
+function getRecentMatches(limit = 20) {
+  const matches = loadMatches();
+  return matches.slice(0, limit);
+}
+
+// ===========================================
 // PLAYER MANAGEMENT
 // ===========================================
 
@@ -134,6 +193,14 @@ function updatePlayer(odiscordId, data) {
   return db[odiscordId];
 }
 
+function getAllPlayers() {
+  const db = loadDatabase();
+  return Object.values(db).map(p => ({
+    ...p,
+    rank: getRank(p.elo)
+  }));
+}
+
 // ===========================================
 // ELO CALCULATIONS
 // ===========================================
@@ -170,13 +237,14 @@ function getTeamAverageElo(playerIds) {
 // PROCESS MATCH RESULT
 // ===========================================
 
-function processMatchResult(winnerIds, loserIds) {
+function processMatchResult(winnerIds, loserIds, lobbyId) {
   const winnerAvgElo = getTeamAverageElo(winnerIds);
   const loserAvgElo = getTeamAverageElo(loserIds);
   
   const results = {
     winners: [],
-    losers: []
+    losers: [],
+    lobbyId
   };
   
   const db = loadDatabase();
@@ -194,6 +262,7 @@ function processMatchResult(winnerIds, loserIds) {
     results.winners.push({
       odiscordId,
       username: db[odiscordId].username,
+      avatar: db[odiscordId].avatar,
       oldElo,
       newElo,
       change: newElo - oldElo
@@ -213,6 +282,7 @@ function processMatchResult(winnerIds, loserIds) {
     results.losers.push({
       odiscordId,
       username: db[odiscordId].username,
+      avatar: db[odiscordId].avatar,
       oldElo,
       newElo,
       change: newElo - oldElo
@@ -220,6 +290,10 @@ function processMatchResult(winnerIds, loserIds) {
   }
   
   saveDatabase(db);
+  
+  // Save match to history
+  saveMatch(results);
+  
   return results;
 }
 
@@ -240,7 +314,7 @@ function getRank(elo) {
 // LEADERBOARD
 // ===========================================
 
-function getLeaderboard(limit = 10) {
+function getLeaderboard(limit = 50) {
   const db = loadDatabase();
   const players = Object.values(db);
   
@@ -258,6 +332,7 @@ module.exports = {
   getPlayer,
   getOrCreatePlayer,
   updatePlayer,
+  getAllPlayers,
   processMatchResult,
   getRank,
   getLeaderboard,
@@ -265,5 +340,8 @@ module.exports = {
   setUserSession,
   getUserSession,
   clearUserSession,
-  clearLobbySession
+  clearLobbySession,
+  getPlayerMatches,
+  getRecentMatches,
+  saveMatch
 };

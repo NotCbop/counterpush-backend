@@ -6,10 +6,11 @@ module.exports = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   GUILD_ID: process.env.GUILD_ID,
 
-  // Voice Channels
-  DRAFT_CHANNEL_ID: process.env.DRAFT_CHANNEL_ID,
-  TEAM_1_VOICE_CHANNEL_ID: process.env.TEAM_1_VOICE_ID,
-  TEAM_2_VOICE_CHANNEL_ID: process.env.TEAM_2_VOICE_ID,
+  // Voice Channel Category (bot will create VCs under this)
+  VOICE_CATEGORY_ID: process.env.VOICE_CATEGORY_ID,
+
+  // Match Results Channel
+  MATCH_RESULTS_CHANNEL_ID: process.env.MATCH_RESULTS_CHANNEL_ID || '1468819780873097328',
 
   // Rank Role IDs
   RANK_ROLES: {

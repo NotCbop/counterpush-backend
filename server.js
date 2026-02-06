@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
 const CONFIG = require('./config');
 const db = require('./database');
 
@@ -37,7 +37,8 @@ const io = new Server(server, {
 const discordClient = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMembers
   ]
 });
 
@@ -46,59 +47,26 @@ discordClient.once('ready', () => {
 });
 
 // ===========================================
-// HELPER: Check if user is in draft voice channel
-// ===========================================
-
-async function isUserInDraftChannel(odiscordId) {
-  if (!discordClient.isReady()) return false;
-  
-  try {
-    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-    if (!guild) return false;
-    
-    const member = await guild.members.fetch(odiscordId).catch(() => null);
-    if (!member) return false;
-    
-    return member.voice?.channelId === CONFIG.DRAFT_CHANNEL_ID;
-  } catch (e) {
-    console.error('Error checking voice channel:', e);
-    return false;
-  }
-}
-
-// ===========================================
 // HELPER: Update player's rank role
 // ===========================================
 
 async function updatePlayerRankRole(odiscordId, newRank) {
-  if (!discordClient.isReady()) {
-    console.log('Discord bot not ready, skipping role update');
-    return;
-  }
+  if (!discordClient.isReady()) return;
   
   try {
     const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-    if (!guild) {
-      console.log('Guild not found, skipping role update');
-      return;
-    }
+    if (!guild) return;
     
     const member = await guild.members.fetch(odiscordId).catch(() => null);
-    if (!member) {
-      console.log(`Member ${odiscordId} not found, skipping role update`);
-      return;
-    }
+    if (!member) return;
     
-    // Get all rank role IDs
     const allRankRoleIds = Object.values(CONFIG.RANK_ROLES);
-    
-    // Remove all existing rank roles
     const rolesToRemove = member.roles.cache.filter(role => allRankRoleIds.includes(role.id));
+    
     for (const [roleId, role] of rolesToRemove) {
       await member.roles.remove(role).catch(e => console.error('Error removing role:', e));
     }
     
-    // Add the new rank role
     const newRoleId = CONFIG.RANK_ROLES[newRank];
     if (newRoleId) {
       await member.roles.add(newRoleId).catch(e => console.error('Error adding role:', e));
@@ -106,6 +74,280 @@ async function updatePlayerRankRole(odiscordId, newRank) {
     }
   } catch (e) {
     console.error('Error updating rank role:', e);
+  }
+}
+
+// ===========================================
+// HELPER: Create Voice Channels for Lobby
+// ===========================================
+
+async function createLobbyVoiceChannels(lobbyId) {
+  if (!discordClient.isReady()) return null;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return null;
+    
+    const category = CONFIG.VOICE_CATEGORY_ID ? 
+      guild.channels.cache.get(CONFIG.VOICE_CATEGORY_ID) : null;
+    
+    // Create lobby VC (waiting room)
+    const lobbyVC = await guild.channels.create({
+      name: `🎮 Lobby ${lobbyId}`,
+      type: ChannelType.GuildVoice,
+      parent: category?.id,
+      userLimit: 10
+    });
+    
+    console.log(`Created lobby VC: ${lobbyVC.name}`);
+    
+    return {
+      lobbyVCId: lobbyVC.id,
+      lobbyVCName: lobbyVC.name
+    };
+  } catch (e) {
+    console.error('Error creating lobby voice channels:', e);
+    return null;
+  }
+}
+
+// ===========================================
+// HELPER: Create Team Voice Channels
+// ===========================================
+
+async function createTeamVoiceChannels(lobbyId) {
+  if (!discordClient.isReady()) return null;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return null;
+    
+    const category = CONFIG.VOICE_CATEGORY_ID ? 
+      guild.channels.cache.get(CONFIG.VOICE_CATEGORY_ID) : null;
+    
+    // Create team VCs
+    const team1VC = await guild.channels.create({
+      name: `🔵 Team 1 - ${lobbyId}`,
+      type: ChannelType.GuildVoice,
+      parent: category?.id,
+      userLimit: 5
+    });
+    
+    const team2VC = await guild.channels.create({
+      name: `🔴 Team 2 - ${lobbyId}`,
+      type: ChannelType.GuildVoice,
+      parent: category?.id,
+      userLimit: 5
+    });
+    
+    console.log(`Created team VCs for lobby ${lobbyId}`);
+    
+    return {
+      team1VCId: team1VC.id,
+      team2VCId: team2VC.id
+    };
+  } catch (e) {
+    console.error('Error creating team voice channels:', e);
+    return null;
+  }
+}
+
+// ===========================================
+// HELPER: Delete Voice Channels
+// ===========================================
+
+async function deleteVoiceChannel(channelId) {
+  if (!discordClient.isReady() || !channelId) return;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    
+    const channel = guild.channels.cache.get(channelId);
+    if (channel) {
+      await channel.delete();
+      console.log(`Deleted VC: ${channelId}`);
+    }
+  } catch (e) {
+    console.error('Error deleting voice channel:', e);
+  }
+}
+
+// ===========================================
+// HELPER: Check if all players are in lobby VC
+// ===========================================
+
+async function areAllPlayersInLobbyVC(lobby) {
+  if (!discordClient.isReady() || !lobby.lobbyVCId) return false;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return false;
+    
+    const lobbyVC = guild.channels.cache.get(lobby.lobbyVCId);
+    if (!lobbyVC) return false;
+    
+    for (const player of lobby.players) {
+      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
+      if (!member || member.voice?.channelId !== lobby.lobbyVCId) {
+        return false;
+      }
+    }
+    
+    return true;
+  } catch (e) {
+    console.error('Error checking players in VC:', e);
+    return false;
+  }
+}
+
+// ===========================================
+// HELPER: Get players in lobby VC
+// ===========================================
+
+async function getPlayersInLobbyVC(lobby) {
+  if (!discordClient.isReady() || !lobby.lobbyVCId) return [];
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return [];
+    
+    const inVC = [];
+    for (const player of lobby.players) {
+      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
+      if (member && member.voice?.channelId === lobby.lobbyVCId) {
+        inVC.push(player.odiscordId);
+      }
+    }
+    
+    return inVC;
+  } catch (e) {
+    console.error('Error getting players in VC:', e);
+    return [];
+  }
+}
+
+// ===========================================
+// HELPER: Move players to team VCs
+// ===========================================
+
+async function movePlayersToTeamVCs(lobby) {
+  if (!discordClient.isReady()) return;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    
+    // Move team 1
+    for (const player of lobby.teams.team1) {
+      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
+      if (member && member.voice?.channel && lobby.team1VCId) {
+        await member.voice.setChannel(lobby.team1VCId).catch(e => console.error('Move error:', e));
+      }
+    }
+    
+    // Move team 2
+    for (const player of lobby.teams.team2) {
+      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
+      if (member && member.voice?.channel && lobby.team2VCId) {
+        await member.voice.setChannel(lobby.team2VCId).catch(e => console.error('Move error:', e));
+      }
+    }
+    
+    console.log(`Moved players to team VCs for lobby ${lobby.id}`);
+  } catch (e) {
+    console.error('Error moving players to team VCs:', e);
+  }
+}
+
+// ===========================================
+// HELPER: Move players back to lobby VC
+// ===========================================
+
+async function movePlayersToLobbyVC(lobby) {
+  if (!discordClient.isReady() || !lobby.lobbyVCId) return;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    
+    const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
+    
+    for (const player of allPlayers) {
+      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
+      if (member && member.voice?.channel) {
+        await member.voice.setChannel(lobby.lobbyVCId).catch(e => console.error('Move error:', e));
+      }
+    }
+    
+    console.log(`Moved players back to lobby VC for lobby ${lobby.id}`);
+  } catch (e) {
+    console.error('Error moving players back:', e);
+  }
+}
+
+// ===========================================
+// HELPER: Send match result to Discord
+// ===========================================
+
+async function sendMatchResultToDiscord(lobby, results) {
+  if (!discordClient.isReady()) return;
+  
+  try {
+    const channel = discordClient.channels.cache.get(CONFIG.MATCH_RESULTS_CHANNEL_ID);
+    if (!channel) {
+      console.log('Match results channel not found');
+      return;
+    }
+    
+    const winnerTeam = lobby.score.team1 >= 2 ? 'Team 1' : 'Team 2';
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { 
+      weekday: 'long', 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+    const timeStr = now.toLocaleTimeString('en-US', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      timeZoneName: 'short'
+    });
+    
+    const embed = new EmbedBuilder()
+      .setColor(lobby.score.team1 >= 2 ? 0x3B82F6 : 0xEF4444)
+      .setTitle(`🏆 Match Complete - ${winnerTeam} Wins!`)
+      .setDescription(`**Lobby:** ${lobby.id}\n**Date:** ${dateStr}\n**Time:** ${timeStr}`)
+      .addFields(
+        {
+          name: `🔵 Team 1 ${lobby.score.team1 >= 2 ? '(Winner)' : ''}`,
+          value: results.winners.filter(p => lobby.teams.team1.some(t => t.odiscordId === p.odiscordId))
+            .concat(results.losers.filter(p => lobby.teams.team1.some(t => t.odiscordId === p.odiscordId)))
+            .map(p => `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})`)
+            .join('\n') || 'No players',
+          inline: true
+        },
+        {
+          name: `🔴 Team 2 ${lobby.score.team2 >= 2 ? '(Winner)' : ''}`,
+          value: results.winners.filter(p => lobby.teams.team2.some(t => t.odiscordId === p.odiscordId))
+            .concat(results.losers.filter(p => lobby.teams.team2.some(t => t.odiscordId === p.odiscordId)))
+            .map(p => `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})`)
+            .join('\n') || 'No players',
+          inline: true
+        },
+        {
+          name: '📊 Final Score',
+          value: `**${lobby.score.team1}** - **${lobby.score.team2}**`,
+          inline: false
+        }
+      )
+      .setTimestamp()
+      .setFooter({ text: 'Counterpush Ranked' });
+    
+    await channel.send({ embeds: [embed] });
+    console.log('Match result sent to Discord');
+  } catch (e) {
+    console.error('Error sending match result to Discord:', e);
   }
 }
 
@@ -124,65 +366,119 @@ function generateLobbyCode() {
   return code;
 }
 
-function createLobby(hostId, hostData, maxPlayers = CONFIG.MAX_PLAYERS) {
-  const code = generateLobbyCode();
-  
-  const host = db.getOrCreatePlayer(hostId, hostData.username, hostData.avatar);
-  
+function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
+  let code;
+  do {
+    code = generateLobbyCode();
+  } while (lobbies.has(code));
+
+  const hostPlayer = db.getOrCreatePlayer(hostId, hostData.username, hostData.avatar);
+
   const lobby = {
     id: code,
-    host: host,
+    host: hostPlayer,
+    players: [hostPlayer],
+    maxPlayers,
     phase: 'waiting',
-    players: [host],
     captains: [],
     teams: { team1: [], team2: [] },
     currentTurn: null,
-    picksLeft: 1,
+    picksLeft: 0,
     score: { team1: 0, team2: 0 },
-    maxPlayers: maxPlayers,
+    isPublic,
+    lobbyVCId: null,
+    team1VCId: null,
+    team2VCId: null,
     createdAt: Date.now()
   };
-  
+
   lobbies.set(code, lobby);
   db.setUserSession(hostId, code);
   
-  console.log(`Lobby ${code} created by ${hostData.username}`);
+  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic})`);
   return lobby;
 }
 
 function getLobby(code) {
-  return lobbies.get(code) || null;
+  return lobbies.get(code?.toUpperCase()) || null;
 }
 
 function deleteLobby(code) {
-  db.clearLobbySession(code);
-  lobbies.delete(code);
+  const lobby = lobbies.get(code);
+  if (lobby) {
+    // Delete voice channels
+    deleteVoiceChannel(lobby.lobbyVCId);
+    deleteVoiceChannel(lobby.team1VCId);
+    deleteVoiceChannel(lobby.team2VCId);
+    
+    db.clearLobbySession(code);
+    lobbies.delete(code);
+    console.log(`Lobby ${code} deleted`);
+  }
+}
+
+function getPublicLobbies() {
+  const publicLobbies = [];
+  for (const [code, lobby] of lobbies) {
+    if (lobby.isPublic && lobby.phase === 'waiting') {
+      publicLobbies.push({
+        id: lobby.id,
+        host: { username: lobby.host.username, avatar: lobby.host.avatar },
+        playerCount: lobby.players.length,
+        maxPlayers: lobby.maxPlayers,
+        createdAt: lobby.createdAt
+      });
+    }
+  }
+  return publicLobbies.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 // ===========================================
-// API ROUTES
+// REST API ENDPOINTS
 // ===========================================
 
 app.get('/api/leaderboard', (req, res) => {
-  const limit = parseInt(req.query.limit) || 10;
-  const leaderboard = db.getLeaderboard(limit);
+  const leaderboard = db.getLeaderboard(50);
   res.json(leaderboard);
 });
 
-app.get('/api/players/:odiscordId', (req, res) => {
-  const player = db.getPlayer(req.params.odiscordId);
+app.get('/api/players/:id', (req, res) => {
+  const player = db.getPlayer(req.params.id);
   if (!player) {
     return res.status(404).json({ error: 'Player not found' });
   }
-  res.json(player);
+  
+  // Include match history
+  const matches = db.getPlayerMatches(req.params.id, 10);
+  res.json({ ...player, recentMatches: matches });
+});
+
+app.get('/api/players', (req, res) => {
+  const players = db.getAllPlayers();
+  res.json(players);
+});
+
+app.get('/api/matches', (req, res) => {
+  const matches = db.getRecentMatches(20);
+  res.json(matches);
+});
+
+app.get('/api/matches/:playerId', (req, res) => {
+  const matches = db.getPlayerMatches(req.params.playerId, 20);
+  res.json(matches);
 });
 
 app.get('/api/lobby/:code', (req, res) => {
-  const lobby = getLobby(req.params.code.toUpperCase());
+  const lobby = getLobby(req.params.code);
   if (!lobby) {
     return res.status(404).json({ error: 'Lobby not found' });
   }
   res.json(lobby);
+});
+
+app.get('/api/lobbies', (req, res) => {
+  const publicLobbies = getPublicLobbies();
+  res.json(publicLobbies);
 });
 
 app.get('/api/session/:odiscordId', (req, res) => {
@@ -218,33 +514,32 @@ io.on('connection', (socket) => {
     socket.emit('noSession');
   });
 
-  socket.on('createLobby', async ({ userData, maxPlayers, testMode }) => {
-    console.log('createLobby called:', { userData: userData.username, maxPlayers, testMode });
+  socket.on('createLobby', async ({ userData, maxPlayers, isPublic }) => {
+    console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic });
     
-    // Voice channel check disabled - enable SERVER MEMBERS INTENT in Discord Developer Portal to use it
-    // if (!testMode) {
-    //   if (!discordClient.isReady()) {
-    //     socket.emit('error', { message: 'Discord bot is not connected. Try Test Mode or wait a moment.' });
-    //     return;
-    //   }
-    //   const inChannel = await isUserInDraftChannel(userData.odiscordId);
-    //   if (!inChannel) {
-    //     socket.emit('error', { message: 'You must be in the draft voice channel to create a lobby' });
-    //     return;
-    //   }
-    // }
+    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
     
-    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS);
-    lobby.testMode = testMode || false;
+    // Create lobby VC if public
+    if (isPublic) {
+      const vcData = await createLobbyVoiceChannels(lobby.id);
+      if (vcData) {
+        lobby.lobbyVCId = vcData.lobbyVCId;
+        lobby.lobbyVCName = vcData.lobbyVCName;
+      }
+    }
     
     socket.join(lobby.id);
     socket.lobbyId = lobby.id;
     socket.odiscordId = userData.odiscordId;
     socket.emit('lobbyCreated', lobby);
+    
+    // Broadcast to lobby browser
+    io.emit('lobbiesUpdate', getPublicLobbies());
+    
     console.log('Lobby created:', lobby.id);
   });
 
-  socket.on('joinLobby', async ({ code, userData, testMode }) => {
+  socket.on('joinLobby', async ({ code, userData }) => {
     const lobby = getLobby(code.toUpperCase());
     
     if (!lobby) {
@@ -261,7 +556,7 @@ io.on('connection', (socket) => {
         socket.emit('lobbyJoined', lobby);
         return;
       }
-      socket.emit('error', { message: 'Game already started' });
+      socket.emit('error', { message: 'Game already in progress' });
       return;
     }
 
@@ -278,22 +573,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Voice channel check disabled
-    // if (!lobby.testMode && !testMode) {
-    //   const inChannel = await isUserInDraftChannel(userData.odiscordId);
-    //   if (!inChannel) {
-    //     socket.emit('error', { message: 'You must be in the draft voice channel to join' });
-    //     return;
-    //   }
-    // }
-
     const player = db.getOrCreatePlayer(userData.odiscordId, userData.username, userData.avatar);
     lobby.players.push(player);
-    
-    // Assign initial rank role if this is a new player
-    if (!lobby.testMode && !testMode && player.gamesPlayed === 0) {
-      updatePlayerRankRole(userData.odiscordId, player.rank);
-    }
     
     db.setUserSession(userData.odiscordId, lobby.id);
     
@@ -303,11 +584,26 @@ io.on('connection', (socket) => {
 
     socket.emit('lobbyJoined', lobby);
     io.to(lobby.id).emit('lobbyUpdate', lobby);
+    io.emit('lobbiesUpdate', getPublicLobbies());
     
     console.log(`${userData.username} joined lobby ${lobby.id}`);
   });
 
-  socket.on('startCaptainSelect', ({ lobbyId }) => {
+  socket.on('getPublicLobbies', () => {
+    socket.emit('lobbiesUpdate', getPublicLobbies());
+  });
+
+  socket.on('checkVCStatus', async ({ lobbyId }) => {
+    const lobby = getLobby(lobbyId);
+    if (!lobby) return;
+    
+    const playersInVC = await getPlayersInLobbyVC(lobby);
+    const allInVC = playersInVC.length === lobby.players.length;
+    
+    socket.emit('vcStatus', { playersInVC, allInVC });
+  });
+
+  socket.on('startCaptainSelect', async ({ lobbyId }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) {
@@ -321,12 +617,24 @@ io.on('connection', (socket) => {
     }
 
     if (lobby.players.length < 4) {
-      socket.emit('error', { message: 'Need at least 4 players to start' });
+      socket.emit('error', { message: 'Need at least 4 players' });
       return;
+    }
+
+    // Check if all players are in VC for public lobbies
+    if (lobby.isPublic && lobby.lobbyVCId) {
+      const allInVC = await areAllPlayersInLobbyVC(lobby);
+      if (!allInVC) {
+        socket.emit('error', { message: 'All players must be in the voice channel to start' });
+        return;
+      }
     }
 
     lobby.phase = 'captain-select';
     io.to(lobby.id).emit('lobbyUpdate', lobby);
+    io.emit('lobbiesUpdate', getPublicLobbies());
+    
+    console.log(`Lobby ${lobbyId} started captain select`);
   });
 
   socket.on('selectCaptain', ({ lobbyId, odiscordId }) => {
@@ -343,17 +651,7 @@ io.on('connection', (socket) => {
     }
 
     if (lobby.phase !== 'captain-select') {
-      socket.emit('error', { message: 'Not in captain selection phase' });
-      return;
-    }
-
-    if (lobby.captains.length >= 2) {
-      socket.emit('error', { message: 'Already have 2 captains' });
-      return;
-    }
-
-    if (lobby.captains.find(c => c.odiscordId === odiscordId)) {
-      socket.emit('error', { message: 'Player is already a captain' });
+      socket.emit('error', { message: 'Not in captain select phase' });
       return;
     }
 
@@ -363,14 +661,19 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (lobby.captains.some(c => c.odiscordId === odiscordId)) {
+      socket.emit('error', { message: 'Player is already a captain' });
+      return;
+    }
+
     lobby.captains.push(player);
 
     if (lobby.captains.length === 1) {
       lobby.teams.team1.push(player);
-    } else {
+    } else if (lobby.captains.length === 2) {
       lobby.teams.team2.push(player);
       lobby.phase = 'drafting';
-      lobby.currentTurn = Math.random() < 0.5 ? 'team1' : 'team2';
+      lobby.currentTurn = 'team1';
       lobby.picksLeft = 1;
     }
 
@@ -386,14 +689,11 @@ io.on('connection', (socket) => {
     }
 
     if (lobby.phase !== 'drafting') {
-      socket.emit('error', { message: 'Not in draft phase' });
+      socket.emit('error', { message: 'Not in drafting phase' });
       return;
     }
 
-    const currentCaptain = lobby.currentTurn === 'team1' 
-      ? lobby.teams.team1[0] 
-      : lobby.teams.team2[0];
-
+    const currentCaptain = lobby.currentTurn === 'team1' ? lobby.teams.team1[0] : lobby.teams.team2[0];
     if (socket.odiscordId !== currentCaptain.odiscordId) {
       socket.emit('error', { message: 'Not your turn to pick' });
       return;
@@ -405,35 +705,58 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (lobby.captains.find(c => c.odiscordId === odiscordId)) {
-      socket.emit('error', { message: 'Cannot pick a captain' });
-      return;
-    }
-
-    if (lobby.teams.team1.find(p => p.odiscordId === odiscordId) ||
-        lobby.teams.team2.find(p => p.odiscordId === odiscordId)) {
-      socket.emit('error', { message: 'Player already drafted' });
+    if (lobby.captains.some(c => c.odiscordId === odiscordId) ||
+        lobby.teams.team1.some(t => t.odiscordId === odiscordId) ||
+        lobby.teams.team2.some(t => t.odiscordId === odiscordId)) {
+      socket.emit('error', { message: 'Player already picked' });
       return;
     }
 
     lobby.teams[lobby.currentTurn].push(player);
     lobby.picksLeft--;
 
-    if (lobby.picksLeft === 0) {
-      lobby.currentTurn = lobby.currentTurn === 'team1' ? 'team2' : 'team1';
-      lobby.picksLeft = 2;
-    }
+    const totalPicked = lobby.teams.team1.length + lobby.teams.team2.length;
+    const playersPerTeam = lobby.maxPlayers / 2;
 
-    const totalDrafted = lobby.teams.team1.length + lobby.teams.team2.length;
-    
-    if (totalDrafted >= lobby.players.length) {
-      lobby.phase = 'playing';
-      lobby.currentTurn = null;
-      movePlayersToVoice(lobby);
+    if (totalPicked >= lobby.maxPlayers) {
+      startPlaying(lobby);
+    } else {
+      if (lobby.picksLeft === 0) {
+        lobby.currentTurn = lobby.currentTurn === 'team1' ? 'team2' : 'team1';
+        
+        const team1Remaining = playersPerTeam - lobby.teams.team1.length;
+        const team2Remaining = playersPerTeam - lobby.teams.team2.length;
+        const unpickedPlayers = lobby.players.length - totalPicked;
+        
+        if (lobby.currentTurn === 'team1') {
+          lobby.picksLeft = Math.min(2, team1Remaining, unpickedPlayers);
+        } else {
+          lobby.picksLeft = Math.min(2, team2Remaining, unpickedPlayers);
+        }
+        
+        if (lobby.picksLeft === 0) {
+          startPlaying(lobby);
+        }
+      }
     }
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
+
+  async function startPlaying(lobby) {
+    // Create team VCs
+    const teamVCs = await createTeamVoiceChannels(lobby.id);
+    if (teamVCs) {
+      lobby.team1VCId = teamVCs.team1VCId;
+      lobby.team2VCId = teamVCs.team2VCId;
+    }
+    
+    lobby.phase = 'playing';
+    lobby.currentTurn = null;
+    
+    // Move players to team VCs
+    await movePlayersToTeamVCs(lobby);
+  }
 
   socket.on('addScore', ({ lobbyId, team }) => {
     const lobby = getLobby(lobbyId);
@@ -458,34 +781,13 @@ io.on('connection', (socket) => {
     lobby.score[team]++;
 
     if (lobby.score.team1 >= 2 || lobby.score.team2 >= 2) {
-      lobby.phase = 'finished';
-
-      const winnerTeam = lobby.score.team1 >= 2 ? 'team1' : 'team2';
-      const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
-      const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
-
-      const results = db.processMatchResult(winnerIds, loserIds);
-      lobby.eloResults = results;
-
-      // Update rank roles for all players
-      for (const player of [...results.winners, ...results.losers]) {
-        const newRank = db.getRank(player.newElo);
-        const oldRank = db.getRank(player.oldElo);
-        // Only update if rank changed
-        if (newRank !== oldRank) {
-          updatePlayerRankRole(player.odiscordId, newRank);
-        }
-      }
-
-      movePlayersBack(lobby);
-      sendMatchResultToDiscord(lobby, results);
+      finishMatch(lobby);
     }
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
 
-  // Host declares a winner directly
-  socket.on('declareWinner', ({ lobbyId, winnerTeam }) => {
+  socket.on('declareWinner', async ({ lobbyId, winnerTeam }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) {
@@ -505,17 +807,25 @@ io.on('connection', (socket) => {
       return;
     }
 
-    lobby.phase = 'finished';
     lobby.score[winnerTeam] = 2;
     lobby.score[winnerTeam === 'team1' ? 'team2' : 'team1'] = 0;
 
+    await finishMatch(lobby);
+
+    io.to(lobby.id).emit('lobbyUpdate', lobby);
+  });
+
+  async function finishMatch(lobby) {
+    lobby.phase = 'finished';
+
+    const winnerTeam = lobby.score.team1 >= 2 ? 'team1' : 'team2';
     const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
     const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
 
-    const results = db.processMatchResult(winnerIds, loserIds);
+    const results = db.processMatchResult(winnerIds, loserIds, lobby.id);
     lobby.eloResults = results;
 
-    // Update rank roles for all players
+    // Update rank roles
     for (const player of [...results.winners, ...results.losers]) {
       const newRank = db.getRank(player.newElo);
       const oldRank = db.getRank(player.oldElo);
@@ -524,10 +834,42 @@ io.on('connection', (socket) => {
       }
     }
 
-    movePlayersBack(lobby);
+    // Move players back to lobby VC
+    await movePlayersToLobbyVC(lobby);
+    
+    // Delete team VCs
+    await deleteVoiceChannel(lobby.team1VCId);
+    await deleteVoiceChannel(lobby.team2VCId);
+    lobby.team1VCId = null;
+    lobby.team2VCId = null;
+
+    // Send result to Discord
     sendMatchResultToDiscord(lobby, results);
+  }
+
+  socket.on('resetLobby', ({ lobbyId }) => {
+    const lobby = getLobby(lobbyId);
+    
+    if (!lobby) {
+      socket.emit('error', { message: 'Lobby not found' });
+      return;
+    }
+
+    if (socket.odiscordId !== lobby.host.odiscordId) {
+      socket.emit('error', { message: 'Only the host can reset the lobby' });
+      return;
+    }
+
+    lobby.phase = 'waiting';
+    lobby.captains = [];
+    lobby.teams = { team1: [], team2: [] };
+    lobby.currentTurn = null;
+    lobby.picksLeft = 0;
+    lobby.score = { team1: 0, team2: 0 };
+    lobby.eloResults = null;
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
+    io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
   socket.on('leaveLobby', ({ lobbyId }) => {
@@ -543,6 +885,7 @@ io.on('connection', (socket) => {
     if (socket.odiscordId === lobby.host.odiscordId) {
       io.to(lobbyId).emit('lobbyClosed', { reason: 'Host left the lobby' });
       deleteLobby(lobbyId);
+      io.emit('lobbiesUpdate', getPublicLobbies());
       return;
     }
 
@@ -551,50 +894,16 @@ io.on('connection', (socket) => {
     
     socket.leave(lobbyId);
     io.to(lobbyId).emit('lobbyUpdate', lobby);
-  });
-
-  socket.on('closeLobby', ({ lobbyId }) => {
-    const lobby = getLobby(lobbyId);
-    
-    if (!lobby) return;
-
-    if (socket.odiscordId !== lobby.host.odiscordId) {
-      socket.emit('error', { message: 'Only the host can close the lobby' });
-      return;
-    }
-
-    io.to(lobbyId).emit('lobbyClosed', { reason: 'Host closed the lobby' });
-    deleteLobby(lobbyId);
-  });
-
-  socket.on('resetLobby', ({ lobbyId }) => {
-    const lobby = getLobby(lobbyId);
-    
-    if (!lobby) return;
-
-    if (socket.odiscordId !== lobby.host.odiscordId) {
-      socket.emit('error', { message: 'Only the host can reset the lobby' });
-      return;
-    }
-
-    lobby.phase = 'waiting';
-    lobby.captains = [];
-    lobby.teams = { team1: [], team2: [] };
-    lobby.currentTurn = null;
-    lobby.picksLeft = 1;
-    lobby.score = { team1: 0, team2: 0 };
-    lobby.eloResults = null;
-
-    io.to(lobbyId).emit('lobbyUpdate', lobby);
+    io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
   socket.on('kickPlayer', ({ lobbyId, odiscordId }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) return;
-
+    
     if (socket.odiscordId !== lobby.host.odiscordId) {
-      socket.emit('error', { message: 'Only the host can kick players' });
+      socket.emit('error', { message: 'Only host can kick players' });
       return;
     }
 
@@ -610,9 +919,25 @@ io.on('connection', (socket) => {
 
     lobby.players = lobby.players.filter(p => p.odiscordId !== odiscordId);
     db.clearUserSession(odiscordId);
-    
+
     io.to(lobbyId).emit('playerKicked', { odiscordId });
     io.to(lobbyId).emit('lobbyUpdate', lobby);
+    io.emit('lobbiesUpdate', getPublicLobbies());
+  });
+
+  socket.on('closeLobby', ({ lobbyId }) => {
+    const lobby = getLobby(lobbyId);
+    
+    if (!lobby) return;
+    
+    if (socket.odiscordId !== lobby.host.odiscordId) {
+      socket.emit('error', { message: 'Only host can close lobby' });
+      return;
+    }
+
+    io.to(lobbyId).emit('lobbyClosed', { reason: 'Host closed the lobby' });
+    deleteLobby(lobbyId);
+    io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
   socket.on('disconnect', () => {
@@ -621,113 +946,13 @@ io.on('connection', (socket) => {
 });
 
 // ===========================================
-// DISCORD VOICE HELPERS
-// ===========================================
-
-async function movePlayersToVoice(lobby) {
-  if (!discordClient.isReady() || lobby.testMode) return;
-
-  const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-  if (!guild) return;
-
-  for (const player of lobby.teams.team1) {
-    try {
-      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
-      if (member && member.voice.channel) {
-        await member.voice.setChannel(CONFIG.TEAM_1_VOICE_CHANNEL_ID);
-      }
-    } catch (e) {
-      console.error('Error moving player:', e.message);
-    }
-  }
-
-  for (const player of lobby.teams.team2) {
-    try {
-      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
-      if (member && member.voice.channel) {
-        await member.voice.setChannel(CONFIG.TEAM_2_VOICE_CHANNEL_ID);
-      }
-    } catch (e) {
-      console.error('Error moving player:', e.message);
-    }
-  }
-}
-
-async function movePlayersBack(lobby) {
-  if (!discordClient.isReady() || lobby.testMode) return;
-
-  const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-  if (!guild) return;
-
-  const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
-
-  for (const player of allPlayers) {
-    try {
-      const member = await guild.members.fetch(player.odiscordId).catch(() => null);
-      if (member && member.voice.channel) {
-        await member.voice.setChannel(CONFIG.DRAFT_CHANNEL_ID);
-      }
-    } catch (e) {
-      console.error('Error moving player back:', e.message);
-    }
-  }
-}
-
-async function sendMatchResultToDiscord(lobby, results) {
-  if (!discordClient.isReady() || lobby.testMode) return;
-
-  const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
-  if (!guild) return;
-
-  const winnerTeam = lobby.score.team1 >= 2 ? 'Team 1' : 'Team 2';
-  const winnerColor = lobby.score.team1 >= 2 ? 0x3b82f6 : 0xef4444;
-
-  let eloChanges = '';
-  for (const r of results.winners) {
-    eloChanges += `${r.username}: ${r.oldElo} → ${r.newElo} (+${r.change})\n`;
-  }
-  for (const r of results.losers) {
-    eloChanges += `${r.username}: ${r.oldElo} → ${r.newElo} (${r.change})\n`;
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(`🏆 ${winnerTeam} Wins!`)
-    .setDescription(`**Lobby ${lobby.id}**\n**Score: ${lobby.score.team1} - ${lobby.score.team2}**`)
-    .addFields(
-      {
-        name: 'Team 1',
-        value: lobby.teams.team1.map(p => `<@${p.odiscordId}>`).join('\n'),
-        inline: true
-      },
-      {
-        name: 'Team 2',
-        value: lobby.teams.team2.map(p => `<@${p.odiscordId}>`).join('\n'),
-        inline: true
-      },
-      {
-        name: 'ELO Changes',
-        value: eloChanges || 'No changes',
-        inline: false
-      }
-    )
-    .setColor(winnerColor);
-
-  const channel = guild.channels.cache.find(c => c.name === 'match-results' || c.name === 'general');
-  if (channel) {
-    channel.send({ embeds: [embed] });
-  }
-}
-
-// ===========================================
 // START SERVER
 // ===========================================
+
+discordClient.login(CONFIG.BOT_TOKEN).catch(e => {
+  console.error('Failed to login to Discord:', e.message);
+});
 
 server.listen(CONFIG.PORT, () => {
   console.log(`Server running on port ${CONFIG.PORT}`);
 });
-
-if (CONFIG.BOT_TOKEN && CONFIG.BOT_TOKEN !== 'YOUR_BOT_TOKEN_HERE') {
-  discordClient.login(CONFIG.BOT_TOKEN);
-} else {
-  console.log('Discord bot token not configured - running without Discord integration');
-}
