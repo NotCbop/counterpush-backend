@@ -538,6 +538,24 @@ io.on('connection', (socket) => {
   socket.on('createLobby', async ({ userData, maxPlayers, isPublic }) => {
     console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic });
     
+    // Check if user is already hosting a lobby
+    for (const [code, existingLobby] of lobbies) {
+      if (existingLobby.host.odiscordId === userData.odiscordId) {
+        socket.emit('error', { message: 'You are already hosting a lobby' });
+        return;
+      }
+    }
+    
+    // Check if user is already in a lobby
+    const existingSession = db.getUserSession(userData.odiscordId);
+    if (existingSession) {
+      const existingLobby = getLobby(existingSession.lobbyId);
+      if (existingLobby) {
+        socket.emit('error', { message: 'You are already in a lobby. Leave it first.' });
+        return;
+      }
+    }
+    
     const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
     
     // Create lobby VC if public
@@ -989,6 +1007,18 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
+    
+    // Check if this user was a host of any lobby
+    if (socket.odiscordId && socket.lobbyId) {
+      const lobby = getLobby(socket.lobbyId);
+      if (lobby && lobby.host.odiscordId === socket.odiscordId) {
+        // Host disconnected - close the lobby
+        console.log(`Host disconnected, closing lobby ${socket.lobbyId}`);
+        io.to(socket.lobbyId).emit('lobbyClosed', { reason: 'Host disconnected' });
+        deleteLobby(socket.lobbyId);
+        io.emit('lobbiesUpdate', getPublicLobbies());
+      }
+    }
   });
 });
 
