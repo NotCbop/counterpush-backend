@@ -15,6 +15,12 @@ module.exports = {
   // Match Results Channel
   MATCH_RESULTS_CHANNEL_ID: process.env.MATCH_RESULTS_CHANNEL_ID || '1468819780873097328',
 
+  // Minecraft Server (for fetching stats)
+  MINECRAFT_STATS_URL: process.env.MINECRAFT_STATS_URL || 'https://199.231.187.154:8080',
+
+  // ELO K-Factor (doubled for faster ranking)
+  K_FACTOR: 64,
+
   // Rank Role IDs
   RANK_ROLES: {
     S: process.env.RANK_ROLE_S || '1468774139660865774',
@@ -31,7 +37,6 @@ module.exports = {
 
   // ELO Settings
   STARTING_ELO: 1000,
-  K_FACTOR: 32,
 
   // Rank Thresholds
   RANKS: {

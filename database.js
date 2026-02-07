@@ -5,6 +5,7 @@ const CONFIG = require('./config');
 const DB_PATH = path.join(__dirname, 'data', 'players.json');
 const SESSIONS_PATH = path.join(__dirname, 'data', 'sessions.json');
 const MATCHES_PATH = path.join(__dirname, 'data', 'matches.json');
+const LINKS_PATH = path.join(__dirname, 'data', 'minecraft_links.json');
 
 // Ensure data directory exists
 const dataDir = path.join(__dirname, 'data');
@@ -34,6 +35,73 @@ function saveDatabase(data) {
   } catch (error) {
     console.error('Error saving database:', error);
   }
+}
+
+// ===========================================
+// MINECRAFT LINKS
+// ===========================================
+
+function loadLinks() {
+  try {
+    if (fs.existsSync(LINKS_PATH)) {
+      const data = fs.readFileSync(LINKS_PATH, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (error) {
+    console.error('Error loading links:', error);
+  }
+  return { byDiscord: {}, byUUID: {} };
+}
+
+function saveLinks(data) {
+  try {
+    fs.writeFileSync(LINKS_PATH, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('Error saving links:', error);
+  }
+}
+
+function linkMinecraft(discordId, uuid, username) {
+  const links = loadLinks();
+  
+  // Remove old links if they exist
+  if (links.byDiscord[discordId]) {
+    const oldUUID = links.byDiscord[discordId].uuid;
+    delete links.byUUID[oldUUID];
+  }
+  if (links.byUUID[uuid]) {
+    const oldDiscord = links.byUUID[uuid].discordId;
+    delete links.byDiscord[oldDiscord];
+  }
+  
+  // Create new link
+  links.byDiscord[discordId] = { uuid, username, linkedAt: Date.now() };
+  links.byUUID[uuid] = { discordId, username, linkedAt: Date.now() };
+  
+  saveLinks(links);
+  return true;
+}
+
+function getMinecraftByDiscord(discordId) {
+  const links = loadLinks();
+  return links.byDiscord[discordId] || null;
+}
+
+function getDiscordByMinecraft(uuid) {
+  const links = loadLinks();
+  return links.byUUID[uuid] || null;
+}
+
+function unlinkMinecraft(discordId) {
+  const links = loadLinks();
+  if (links.byDiscord[discordId]) {
+    const uuid = links.byDiscord[discordId].uuid;
+    delete links.byUUID[uuid];
+    delete links.byDiscord[discordId];
+    saveLinks(links);
+    return true;
+  }
+  return false;
 }
 
 // ===========================================
@@ -158,6 +226,10 @@ function getPlayer(odiscordId) {
   
   const player = db[odiscordId];
   player.rank = getRank(player.elo);
+  // Calculate KDR
+  player.kdr = player.totalDeaths > 0 
+    ? (player.totalKills / player.totalDeaths).toFixed(2) 
+    : player.totalKills?.toFixed(2) || '0.00';
   return player;
 }
 
@@ -173,16 +245,33 @@ function getOrCreatePlayer(odiscordId, username, avatar) {
       wins: 0,
       losses: 0,
       gamesPlayed: 0,
+      // Lifetime stats
+      totalKills: 0,
+      totalDeaths: 0,
+      totalAssists: 0,
+      totalDamage: 0,
+      totalHealing: 0,
       createdAt: Date.now()
     };
   } else {
     db[odiscordId].username = username;
     db[odiscordId].avatar = avatar;
+    // Ensure stats exist for older players
+    if (db[odiscordId].totalKills === undefined) {
+      db[odiscordId].totalKills = 0;
+      db[odiscordId].totalDeaths = 0;
+      db[odiscordId].totalAssists = 0;
+      db[odiscordId].totalDamage = 0;
+      db[odiscordId].totalHealing = 0;
+    }
   }
   
   saveDatabase(db);
   const player = db[odiscordId];
   player.rank = getRank(player.elo);
+  player.kdr = player.totalDeaths > 0 
+    ? (player.totalKills / player.totalDeaths).toFixed(2) 
+    : player.totalKills?.toFixed(2) || '0.00';
   return player;
 }
 
@@ -343,5 +432,10 @@ module.exports = {
   clearLobbySession,
   getPlayerMatches,
   getRecentMatches,
-  saveMatch
+  saveMatch,
+  // Minecraft linking
+  linkMinecraft,
+  getMinecraftByDiscord,
+  getDiscordByMinecraft,
+  unlinkMinecraft
 };

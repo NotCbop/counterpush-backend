@@ -603,6 +603,77 @@ app.get('/api/session/:odiscordId', (req, res) => {
 });
 
 // ===========================================
+// MINECRAFT LINKING API
+// ===========================================
+
+// Get Minecraft UUID from username using Mojang API
+async function getMinecraftUUID(username) {
+  try {
+    const response = await fetch(`https://api.mojang.com/users/profiles/minecraft/${username}`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return { uuid: data.id, username: data.name };
+  } catch (e) {
+    console.error('Error fetching Minecraft UUID:', e);
+    return null;
+  }
+}
+
+// Fetch player stats from Minecraft server
+async function fetchMinecraftStats(uuid) {
+  try {
+    const response = await fetch(`${CONFIG.MINECRAFT_STATS_URL}/stats?uuid=${uuid}`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data;
+  } catch (e) {
+    console.error('Error fetching Minecraft stats:', e);
+    return null;
+  }
+}
+
+// Link Minecraft account
+app.post('/api/link/minecraft', async (req, res) => {
+  const { discordId, minecraftUsername } = req.body;
+  
+  if (!discordId || !minecraftUsername) {
+    return res.status(400).json({ error: 'Missing discordId or minecraftUsername' });
+  }
+  
+  // Get UUID from Mojang
+  const mcData = await getMinecraftUUID(minecraftUsername);
+  if (!mcData) {
+    return res.status(404).json({ error: 'Minecraft username not found' });
+  }
+  
+  // Link the accounts
+  db.linkMinecraft(discordId, mcData.uuid, mcData.username);
+  
+  res.json({ 
+    success: true, 
+    minecraft: { uuid: mcData.uuid, username: mcData.username }
+  });
+});
+
+// Get linked Minecraft account
+app.get('/api/link/minecraft/:discordId', (req, res) => {
+  const link = db.getMinecraftByDiscord(req.params.discordId);
+  if (!link) {
+    return res.status(404).json({ error: 'No Minecraft account linked' });
+  }
+  res.json(link);
+});
+
+// Unlink Minecraft account
+app.delete('/api/link/minecraft/:discordId', (req, res) => {
+  const success = db.unlinkMinecraft(req.params.discordId);
+  if (!success) {
+    return res.status(404).json({ error: 'No Minecraft account linked' });
+  }
+  res.json({ success: true });
+});
+
+// ===========================================
 // SOCKET.IO HANDLERS
 // ===========================================
 
@@ -999,7 +1070,43 @@ io.on('connection', (socket) => {
     const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
     const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
 
+    // Fetch Minecraft stats for all players (for display only, doesn't affect ELO)
+    const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
+    const playerStats = {};
+    
+    for (const player of allPlayers) {
+      const mcLink = db.getMinecraftByDiscord(player.odiscordId);
+      if (mcLink) {
+        const stats = await fetchMinecraftStats(mcLink.uuid);
+        if (stats) {
+          playerStats[player.odiscordId] = stats;
+          
+          // Update lifetime stats
+          const currentPlayer = db.getPlayer(player.odiscordId);
+          if (currentPlayer) {
+            db.updatePlayer(player.odiscordId, {
+              totalKills: (currentPlayer.totalKills || 0) + (stats.kills || 0),
+              totalDeaths: (currentPlayer.totalDeaths || 0) + (stats.deaths || 0),
+              totalAssists: (currentPlayer.totalAssists || 0) + (stats.assists || 0),
+              totalDamage: (currentPlayer.totalDamage || 0) + (stats.damage || 0),
+              totalHealing: (currentPlayer.totalHealing || 0) + (stats.healing || 0)
+            });
+          }
+        }
+      }
+    }
+
+    // Calculate ELO (not affected by stats)
     const results = db.processMatchResult(winnerIds, loserIds, lobby.id);
+    
+    // Add stats to results for display
+    for (const player of results.winners) {
+      player.stats = playerStats[player.odiscordId] || null;
+    }
+    for (const player of results.losers) {
+      player.stats = playerStats[player.odiscordId] || null;
+    }
+    
     lobby.eloResults = results;
 
     // Update rank roles
