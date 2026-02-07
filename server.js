@@ -822,8 +822,10 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (lobby.players.length < 4) {
-      socket.emit('error', { message: 'Need at least 4 players' });
+    // Allow 2 players for testing, otherwise need 4
+    const minPlayers = lobby.maxPlayers === 2 ? 2 : 4;
+    if (lobby.players.length < minPlayers) {
+      socket.emit('error', { message: `Need at least ${minPlayers} players` });
       return;
     }
 
