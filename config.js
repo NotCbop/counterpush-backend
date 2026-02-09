@@ -16,7 +16,7 @@ module.exports = {
   MATCH_RESULTS_CHANNEL_ID: process.env.MATCH_RESULTS_CHANNEL_ID || '1468819780873097328',
 
   // Minecraft Server (for fetching stats)
-  MINECRAFT_STATS_URL: process.env.MINECRAFT_STATS_URL || 'http://199.231.187.154:25736',
+  MINECRAFT_STATS_URL: process.env.MINECRAFT_STATS_URL || 'http://161.129.71.34:25705',
 
   // ELO K-Factor (doubled for faster ranking)
   K_FACTOR: 64,
