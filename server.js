@@ -622,7 +622,9 @@ async function getMinecraftUUID(username) {
 // Fetch player stats from Minecraft server
 async function fetchMinecraftStats(uuid) {
   try {
-    const response = await fetch(`${CONFIG.MINECRAFT_STATS_URL}/stats?uuid=${uuid}`);
+    // Format UUID with dashes (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    const formattedUuid = uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    const response = await fetch(`${CONFIG.MINECRAFT_STATS_URL}/stats/${formattedUuid}`);
     if (!response.ok) return null;
     const data = await response.json();
     return data;
