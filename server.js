@@ -1074,8 +1074,13 @@ io.on('connection', (socket) => {
             !lobby.captains.some(c => c.odiscordId === p.odiscordId)
           )
         };
-        // Start first auction
-        startNextAuction(lobby);
+        
+        // Send initial update, then start first auction after brief delay
+        io.to(lobby.id).emit('lobbyUpdate', lobby);
+        setTimeout(() => {
+          startNextAuction(lobby);
+        }, 1000);
+        return; // Don't send another lobbyUpdate below
       } else {
         // Normal draft mode
         lobby.phase = 'drafting';
@@ -1157,6 +1162,10 @@ io.on('connection', (socket) => {
     // Add player to team
     lobby.teams[winningTeam].push(player);
     
+    // Clear current player
+    lobby.market.currentPlayer = null;
+    lobby.market.currentBids = { team1: 0, team2: 0 };
+    
     io.to(lobby.id).emit('auctionEnd', {
       player,
       winningTeam,
@@ -1164,6 +1173,9 @@ io.on('connection', (socket) => {
       team1Budget: lobby.market.team1Budget,
       team2Budget: lobby.market.team2Budget
     });
+    
+    // Send updated lobby state
+    io.to(lobby.id).emit('lobbyUpdate', lobby);
     
     // Check if teams are full
     const playersPerTeam = lobby.maxPlayers / 2;
