@@ -81,6 +81,42 @@ discordClient.once('ready', async () => {
         ]
       });
       
+      await guild.commands.create({
+        name: 'declarewinner',
+        description: 'Declare the winner of a lobby (host or moderator)',
+        options: [
+          {
+            name: 'code',
+            description: 'The lobby code',
+            type: 3, // STRING
+            required: true
+          },
+          {
+            name: 'team',
+            description: 'The winning team',
+            type: 3, // STRING
+            required: true,
+            choices: [
+              { name: 'Team 1', value: 'team1' },
+              { name: 'Team 2', value: 'team2' }
+            ]
+          }
+        ]
+      });
+      
+      await guild.commands.create({
+        name: 'draw',
+        description: 'Declare a match as a draw (host or moderator)',
+        options: [
+          {
+            name: 'code',
+            description: 'The lobby code',
+            type: 3, // STRING
+            required: true
+          }
+        ]
+      });
+      
       console.log('Slash commands registered');
     }
   } catch (e) {
@@ -89,7 +125,7 @@ discordClient.once('ready', async () => {
 });
 
 // Moderator role ID
-const MODERATOR_ROLE_ID = '1468066927032401940';
+const MODERATOR_ROLE_ID = '1468766786416676971';
 
 // Handle slash commands
 discordClient.on('interactionCreate', async (interaction) => {
@@ -163,6 +199,140 @@ discordClient.on('interactionCreate', async (interaction) => {
     
     await interaction.reply({ 
       content: `✅ Set **${targetUser.username}**'s ELO from **${oldElo}** to **${newElo}** (Rank: ${oldRank} → ${newRank})`, 
+      ephemeral: true 
+    });
+  }
+  
+  if (interaction.commandName === 'declarewinner') {
+    const code = interaction.options.getString('code').toUpperCase();
+    const winnerTeam = interaction.options.getString('team');
+    const odiscordId = interaction.user.id;
+    
+    const lobby = lobbies.get(code);
+    
+    if (!lobby) {
+      await interaction.reply({ content: '❌ Lobby not found.', ephemeral: true });
+      return;
+    }
+    
+    // Allow if user is host OR has moderator role
+    if (lobby.host.odiscordId !== odiscordId && !isModerator) {
+      await interaction.reply({ content: '❌ Only the host or moderators can declare winners.', ephemeral: true });
+      return;
+    }
+    
+    if (lobby.phase !== 'playing') {
+      await interaction.reply({ content: '❌ Match is not in progress.', ephemeral: true });
+      return;
+    }
+    
+    // Process the match result
+    const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
+    const loserTeam = winnerTeam === 'team1' ? 'team2' : 'team1';
+    const loserIds = lobby.teams[loserTeam].map(p => p.odiscordId);
+    
+    const results = db.processMatchResult(winnerIds, loserIds, lobby.id);
+    
+    // Update rank roles
+    for (const player of [...results.winners, ...results.losers]) {
+      await updatePlayerRankRole(player.odiscordId, player.newRank);
+    }
+    
+    // Update lobby state
+    lobby.phase = 'finished';
+    lobby.score[winnerTeam] = 2;
+    lobby.score[loserTeam] = 0;
+    
+    io.to(code).emit('matchFinished', results);
+    io.to(code).emit('lobbyUpdate', lobby);
+    
+    // Send match result to Discord
+    await sendMatchResultToDiscord(lobby, results);
+    
+    // Move players back to main VC
+    await movePlayersToMainVC(lobby);
+    
+    // Delete team VCs
+    await deleteTeamVoiceChannels(lobby);
+    
+    const declaredBy = isModerator && lobby.host.odiscordId !== odiscordId ? 'Moderator' : 'Host';
+    await interaction.reply({ 
+      content: `✅ **${winnerTeam === 'team1' ? 'Team 1' : 'Team 2'}** declared winner of lobby **${code}** by ${declaredBy}.`, 
+      ephemeral: true 
+    });
+  }
+  
+  if (interaction.commandName === 'draw') {
+    const code = interaction.options.getString('code').toUpperCase();
+    const odiscordId = interaction.user.id;
+    
+    const lobby = lobbies.get(code);
+    
+    if (!lobby) {
+      await interaction.reply({ content: '❌ Lobby not found.', ephemeral: true });
+      return;
+    }
+    
+    // Allow if user is host OR has moderator role
+    if (lobby.host.odiscordId !== odiscordId && !isModerator) {
+      await interaction.reply({ content: '❌ Only the host or moderators can declare a draw.', ephemeral: true });
+      return;
+    }
+    
+    if (lobby.phase !== 'playing') {
+      await interaction.reply({ content: '❌ Match is not in progress.', ephemeral: true });
+      return;
+    }
+    
+    // Process draw - no ELO changes
+    const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
+    
+    // Save match as draw
+    const drawResult = {
+      lobbyId: lobby.id,
+      team1: lobby.teams.team1,
+      team2: lobby.teams.team2,
+      winner: 'draw',
+      score: { team1: 0, team2: 0 },
+      winners: [],
+      losers: [],
+      isDraw: true
+    };
+    
+    db.saveMatch(drawResult);
+    
+    // Update lobby state
+    lobby.phase = 'finished';
+    lobby.isDraw = true;
+    
+    io.to(code).emit('matchDraw', { lobby });
+    io.to(code).emit('lobbyUpdate', lobby);
+    
+    // Move players back to main VC
+    await movePlayersToMainVC(lobby);
+    
+    // Delete team VCs
+    await deleteTeamVoiceChannels(lobby);
+    
+    // Send draw notification to Discord
+    const channel = discordClient.channels.cache.get(CONFIG.MATCH_RESULTS_CHANNEL_ID);
+    if (channel) {
+      const embed = new EmbedBuilder()
+        .setColor(0x808080)
+        .setTitle('🤝 Match Draw')
+        .setDescription(`**Lobby:** ${lobby.id}\nThe match has been declared a draw. No ELO changes.`)
+        .addFields(
+          { name: '🔵 Team 1', value: lobby.teams.team1.map(p => p.username).join('\n') || 'None', inline: true },
+          { name: '🔴 Team 2', value: lobby.teams.team2.map(p => p.username).join('\n') || 'None', inline: true }
+        )
+        .setTimestamp();
+      
+      await channel.send({ embeds: [embed] });
+    }
+    
+    const declaredBy = isModerator && lobby.host.odiscordId !== odiscordId ? 'Moderator' : 'Host';
+    await interaction.reply({ 
+      content: `✅ Lobby **${code}** declared as a **draw** by ${declaredBy}. No ELO changes.`, 
       ephemeral: true 
     });
   }
@@ -1470,6 +1640,71 @@ io.on('connection', (socket) => {
     await finishMatch(lobby);
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
+  });
+
+  socket.on('declareDraw', async ({ lobbyId }) => {
+    const lobby = getLobby(lobbyId);
+    
+    if (!lobby) {
+      socket.emit('error', { message: 'Lobby not found' });
+      return;
+    }
+
+    if (lobby.phase !== 'playing') {
+      socket.emit('error', { message: 'Match not in progress' });
+      return;
+    }
+
+    const isHost = socket.odiscordId === lobby.host.odiscordId;
+    
+    if (!isHost) {
+      socket.emit('error', { message: 'Only the host can declare a draw' });
+      return;
+    }
+
+    // Process draw - no ELO changes
+    lobby.phase = 'finished';
+    lobby.isDraw = true;
+    lobby.score = { team1: 0, team2: 0 };
+    
+    // Save match as draw
+    const drawResult = {
+      lobbyId: lobby.id,
+      team1: lobby.teams.team1,
+      team2: lobby.teams.team2,
+      winner: 'draw',
+      score: { team1: 0, team2: 0 },
+      winners: [],
+      losers: [],
+      isDraw: true
+    };
+    
+    db.saveMatch(drawResult);
+    
+    io.to(lobby.id).emit('matchDraw', { lobby });
+    io.to(lobby.id).emit('lobbyUpdate', lobby);
+    
+    // Send draw notification to Discord
+    const channel = discordClient.channels.cache.get(CONFIG.MATCH_RESULTS_CHANNEL_ID);
+    if (channel) {
+      const embed = new EmbedBuilder()
+        .setColor(0x808080)
+        .setTitle('🤝 Match Draw')
+        .setDescription(`**Lobby:** ${lobby.id}\nThe match has been declared a draw. No ELO changes.`)
+        .addFields(
+          { name: '🔵 Team 1', value: lobby.teams.team1.map(p => p.username).join('\n') || 'None', inline: true },
+          { name: '🔴 Team 2', value: lobby.teams.team2.map(p => p.username).join('\n') || 'None', inline: true }
+        )
+        .setTimestamp();
+      
+      await channel.send({ embeds: [embed] });
+    }
+    
+    // Move players back to main VC
+    await movePlayersToMainVC(lobby);
+    
+    // Delete team VCs
+    await deleteTeamVoiceChannels(lobby);
   });
 
   async function finishMatch(lobby) {
