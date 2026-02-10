@@ -513,6 +513,7 @@ async function sendMatchResultToDiscord(lobby, results) {
 // ===========================================
 
 const lobbies = new Map();
+const purgeImmunity = new Set(); // Players who were purged and are immune next time
 
 function generateLobbyCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -942,8 +943,24 @@ io.on('connection', (socket) => {
     const toEliminate = lobby.players.length - lobby.maxPlayers;
     const eliminated = [];
     
-    // Don't eliminate the host
-    const eliminatablePlayers = lobby.players.filter(p => p.odiscordId !== lobby.host.odiscordId);
+    // Don't eliminate the host OR players with immunity
+    const immunePlayers = lobby.players.filter(p => purgeImmunity.has(p.odiscordId));
+    const eliminatablePlayers = lobby.players.filter(p => 
+      p.odiscordId !== lobby.host.odiscordId && !purgeImmunity.has(p.odiscordId)
+    );
+    
+    // Clear immunity for players in this lobby (they used it)
+    immunePlayers.forEach(p => {
+      purgeImmunity.delete(p.odiscordId);
+      console.log(`${p.username} used their purge immunity`);
+    });
+    
+    // Notify immune players
+    if (immunePlayers.length > 0) {
+      io.to(lobby.id).emit('immunityUsed', { 
+        players: immunePlayers.map(p => ({ odiscordId: p.odiscordId, username: p.username }))
+      });
+    }
     
     for (let i = 0; i < toEliminate; i++) {
       if (eliminatablePlayers.length === 0) break;
@@ -955,6 +972,10 @@ io.on('connection', (socket) => {
       // Remove from lobby
       lobby.players = lobby.players.filter(p => p.odiscordId !== player.odiscordId);
       db.clearUserSession(player.odiscordId);
+      
+      // Grant immunity for next lobby
+      purgeImmunity.add(player.odiscordId);
+      console.log(`${player.username} was purged and granted immunity for next lobby`);
     }
     
     lobby.purgeData.eliminated = eliminated;
@@ -965,7 +986,8 @@ io.on('connection', (socket) => {
         io.to(lobby.id).emit('playerEliminated', { 
           player, 
           index: index + 1, 
-          total: eliminated.length 
+          total: eliminated.length,
+          hasImmunity: true // Let them know they have immunity next time
         });
         
         // Move eliminated player to main VC
