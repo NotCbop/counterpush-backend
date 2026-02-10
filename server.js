@@ -51,7 +51,7 @@ discordClient.once('ready', async () => {
     if (guild) {
       await guild.commands.create({
         name: 'closelobby',
-        description: 'Close a lobby you are hosting',
+        description: 'Close a lobby (host or moderator)',
         options: [
           {
             name: 'code',
@@ -61,6 +61,26 @@ discordClient.once('ready', async () => {
           }
         ]
       });
+      
+      await guild.commands.create({
+        name: 'setelo',
+        description: 'Set a player\'s ELO (moderator only)',
+        options: [
+          {
+            name: 'user',
+            description: 'The user to set ELO for',
+            type: 6, // USER
+            required: true
+          },
+          {
+            name: 'elo',
+            description: 'The new ELO value',
+            type: 4, // INTEGER
+            required: true
+          }
+        ]
+      });
+      
       console.log('Slash commands registered');
     }
   } catch (e) {
@@ -68,9 +88,15 @@ discordClient.once('ready', async () => {
   }
 });
 
+// Moderator role ID
+const MODERATOR_ROLE_ID = '1468066927032401940';
+
 // Handle slash commands
 discordClient.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+  
+  // Check if user has moderator role
+  const isModerator = interaction.member?.roles?.cache?.has(MODERATOR_ROLE_ID);
   
   if (interaction.commandName === 'closelobby') {
     const code = interaction.options.getString('code').toUpperCase();
@@ -83,17 +109,62 @@ discordClient.on('interactionCreate', async (interaction) => {
       return;
     }
     
-    if (lobby.host.odiscordId !== odiscordId) {
+    // Allow if user is host OR has moderator role
+    if (lobby.host.odiscordId !== odiscordId && !isModerator) {
       await interaction.reply({ content: '❌ You are not the host of this lobby.', ephemeral: true });
       return;
     }
     
+    const closedBy = isModerator && lobby.host.odiscordId !== odiscordId ? 'a moderator' : 'the host';
+    
     // Close the lobby
-    io.to(code).emit('lobbyClosed', { reason: 'Host closed the lobby via Discord' });
+    io.to(code).emit('lobbyClosed', { reason: `Lobby closed by ${closedBy} via Discord` });
     await deleteLobby(code);
     io.emit('lobbiesUpdate', getPublicLobbies());
     
     await interaction.reply({ content: `✅ Lobby **${code}** has been closed.`, ephemeral: true });
+  }
+  
+  if (interaction.commandName === 'setelo') {
+    // Only moderators can use this command
+    if (!isModerator) {
+      await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+      return;
+    }
+    
+    const targetUser = interaction.options.getUser('user');
+    const newElo = interaction.options.getInteger('elo');
+    
+    if (newElo < 0 || newElo > 5000) {
+      await interaction.reply({ content: '❌ ELO must be between 0 and 5000.', ephemeral: true });
+      return;
+    }
+    
+    // Get or create player
+    const player = db.getPlayer(targetUser.id);
+    
+    if (!player) {
+      await interaction.reply({ content: '❌ Player not found in database. They need to join a lobby first.', ephemeral: true });
+      return;
+    }
+    
+    const oldElo = player.elo;
+    const oldRank = db.getRank(oldElo);
+    
+    // Update ELO
+    db.updatePlayer(targetUser.id, { elo: newElo });
+    
+    const newRank = db.getRank(newElo);
+    
+    // Update rank role if changed
+    if (newRank !== oldRank) {
+      await updatePlayerRankRole(targetUser.id, newRank);
+    }
+    
+    await interaction.reply({ 
+      content: `✅ Set **${targetUser.username}**'s ELO from **${oldElo}** to **${newElo}** (Rank: ${oldRank} → ${newRank})`, 
+      ephemeral: true 
+    });
   }
 });
 
