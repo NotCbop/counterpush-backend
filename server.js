@@ -523,7 +523,7 @@ function generateLobbyCode() {
   return code;
 }
 
-function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
+function createLobby(hostId, hostData, maxPlayers, isPublic = false, draftMode = 'draft') {
   let code;
   do {
     code = generateLobbyCode();
@@ -543,6 +543,9 @@ function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
     picksLeft: 0,
     score: { team1: 0, team2: 0 },
     isPublic,
+    draftMode, // 'draft' or 'market'
+    // Market mode data
+    market: null,
     lobbyVCId: null,
     team1VCId: null,
     team2VCId: null,
@@ -552,7 +555,7 @@ function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
   lobbies.set(code, lobby);
   db.setUserSession(hostId, code);
   
-  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic})`);
+  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic}, mode: ${draftMode})`);
   return lobby;
 }
 
@@ -768,8 +771,8 @@ io.on('connection', (socket) => {
     socket.emit('noSession');
   });
 
-  socket.on('createLobby', async ({ userData, maxPlayers, isPublic }) => {
-    console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic });
+  socket.on('createLobby', async ({ userData, maxPlayers, isPublic, draftMode }) => {
+    console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic, draftMode });
     
     // Check if user is already hosting a lobby
     for (const [code, existingLobby] of lobbies) {
@@ -789,7 +792,7 @@ io.on('connection', (socket) => {
       }
     }
     
-    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
+    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false, draftMode || 'draft');
     
     // Create lobby VC if public
     if (isPublic) {
@@ -1034,12 +1037,203 @@ io.on('connection', (socket) => {
       lobby.teams.team1.push(player);
     } else if (lobby.captains.length === 2) {
       lobby.teams.team2.push(player);
-      lobby.phase = 'drafting';
-      lobby.currentTurn = 'team1';
-      lobby.picksLeft = 1;
+      
+      // Check draft mode
+      if (lobby.draftMode === 'market') {
+        // Start market mode
+        lobby.phase = 'market';
+        lobby.market = {
+          team1Budget: 1000,
+          team2Budget: 1000,
+          currentPlayer: null,
+          currentBids: { team1: 0, team2: 0 },
+          timerEnd: null,
+          playersRemaining: lobby.players.filter(p => 
+            !lobby.captains.some(c => c.odiscordId === p.odiscordId)
+          )
+        };
+        // Start first auction
+        startNextAuction(lobby);
+      } else {
+        // Normal draft mode
+        lobby.phase = 'drafting';
+        lobby.currentTurn = 'team1';
+        lobby.picksLeft = 1;
+      }
     }
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
+  });
+  
+  // Market mode - start next player auction
+  function startNextAuction(lobby) {
+    if (lobby.market.playersRemaining.length === 0) {
+      // All players auctioned, start playing
+      startPlaying(lobby);
+      io.to(lobby.id).emit('lobbyUpdate', lobby);
+      return;
+    }
+    
+    // Pick random player
+    const randomIndex = Math.floor(Math.random() * lobby.market.playersRemaining.length);
+    const player = lobby.market.playersRemaining.splice(randomIndex, 1)[0];
+    
+    // Get player stats for display
+    const playerData = db.getPlayer(player.odiscordId);
+    const leaderboard = db.getLeaderboard(100);
+    const rank = leaderboard.findIndex(p => p.odiscordId === player.odiscordId) + 1;
+    
+    lobby.market.currentPlayer = {
+      ...player,
+      elo: playerData?.elo || 1000,
+      kdr: playerData?.kdr || '0.00',
+      totalKills: playerData?.totalKills || 0,
+      totalDeaths: playerData?.totalDeaths || 0,
+      leaderboardRank: rank > 0 ? rank : 'Unranked',
+      rank: playerData?.rank || 'C'
+    };
+    lobby.market.currentBids = { team1: 0, team2: 0 };
+    lobby.market.timerEnd = Date.now() + 30000; // 30 seconds
+    
+    io.to(lobby.id).emit('lobbyUpdate', lobby);
+    io.to(lobby.id).emit('auctionStart', { 
+      player: lobby.market.currentPlayer,
+      timerEnd: lobby.market.timerEnd,
+      team1Budget: lobby.market.team1Budget,
+      team2Budget: lobby.market.team2Budget,
+      playersRemaining: lobby.market.playersRemaining.length
+    });
+    
+    // Set timer to end auction
+    setTimeout(() => {
+      endAuction(lobby);
+    }, 30000);
+  }
+  
+  // Market mode - end current auction
+  function endAuction(lobby) {
+    if (!lobby || lobby.phase !== 'market' || !lobby.market?.currentPlayer) return;
+    
+    const { team1: bid1, team2: bid2 } = lobby.market.currentBids;
+    const player = lobby.market.currentPlayer;
+    let winningTeam;
+    
+    if (bid1 > bid2) {
+      winningTeam = 'team1';
+    } else if (bid2 > bid1) {
+      winningTeam = 'team2';
+    } else {
+      // Tie - random winner
+      winningTeam = Math.random() < 0.5 ? 'team1' : 'team2';
+    }
+    
+    const winningBid = winningTeam === 'team1' ? bid1 : bid2;
+    
+    // Deduct from budget
+    lobby.market[`${winningTeam}Budget`] -= winningBid;
+    
+    // Add player to team
+    lobby.teams[winningTeam].push(player);
+    
+    io.to(lobby.id).emit('auctionEnd', {
+      player,
+      winningTeam,
+      winningBid,
+      team1Budget: lobby.market.team1Budget,
+      team2Budget: lobby.market.team2Budget
+    });
+    
+    // Check if teams are full
+    const playersPerTeam = lobby.maxPlayers / 2;
+    if (lobby.teams.team1.length >= playersPerTeam && lobby.teams.team2.length >= playersPerTeam) {
+      // Both teams full, start playing
+      setTimeout(() => {
+        startPlaying(lobby);
+        io.to(lobby.id).emit('lobbyUpdate', lobby);
+      }, 2000);
+      return;
+    }
+    
+    // Check if one team is full
+    if (lobby.teams.team1.length >= playersPerTeam) {
+      // Give remaining players to team2
+      while (lobby.market.playersRemaining.length > 0) {
+        const p = lobby.market.playersRemaining.pop();
+        lobby.teams.team2.push(p);
+      }
+      setTimeout(() => {
+        startPlaying(lobby);
+        io.to(lobby.id).emit('lobbyUpdate', lobby);
+      }, 2000);
+      return;
+    }
+    
+    if (lobby.teams.team2.length >= playersPerTeam) {
+      // Give remaining players to team1
+      while (lobby.market.playersRemaining.length > 0) {
+        const p = lobby.market.playersRemaining.pop();
+        lobby.teams.team1.push(p);
+      }
+      setTimeout(() => {
+        startPlaying(lobby);
+        io.to(lobby.id).emit('lobbyUpdate', lobby);
+      }, 2000);
+      return;
+    }
+    
+    // Start next auction after delay
+    setTimeout(() => {
+      startNextAuction(lobby);
+    }, 2000);
+  }
+  
+  // Market mode - place bid
+  socket.on('placeBid', ({ lobbyId, amount }) => {
+    const lobby = getLobby(lobbyId);
+    
+    if (!lobby || lobby.phase !== 'market') {
+      socket.emit('error', { message: 'Not in market phase' });
+      return;
+    }
+    
+    // Determine which team the bidder is captain of
+    const isCaptain1 = lobby.teams.team1[0]?.odiscordId === socket.odiscordId;
+    const isCaptain2 = lobby.teams.team2[0]?.odiscordId === socket.odiscordId;
+    
+    if (!isCaptain1 && !isCaptain2) {
+      socket.emit('error', { message: 'Only captains can bid' });
+      return;
+    }
+    
+    const team = isCaptain1 ? 'team1' : 'team2';
+    const budget = lobby.market[`${team}Budget`];
+    
+    if (amount > budget) {
+      socket.emit('error', { message: 'Not enough budget' });
+      return;
+    }
+    
+    if (amount < 0) {
+      socket.emit('error', { message: 'Invalid bid amount' });
+      return;
+    }
+    
+    // Must bid higher than current bid (or match if other team hasn't bid)
+    const otherTeam = team === 'team1' ? 'team2' : 'team1';
+    const otherBid = lobby.market.currentBids[otherTeam];
+    
+    if (amount <= lobby.market.currentBids[team] && amount <= otherBid && otherBid > 0) {
+      socket.emit('error', { message: 'Must bid higher' });
+      return;
+    }
+    
+    lobby.market.currentBids[team] = amount;
+    
+    io.to(lobby.id).emit('bidUpdate', {
+      team,
+      amount,
+      currentBids: lobby.market.currentBids
+    });
   });
 
   socket.on('removeCaptain', ({ lobbyId, odiscordId }) => {
@@ -1110,6 +1304,9 @@ io.on('connection', (socket) => {
 
     lobby.teams[lobby.currentTurn].push(player);
     lobby.picksLeft--;
+    
+    // Emit draft pick event for sound
+    io.to(lobby.id).emit('draftPick', { player, team: lobby.currentTurn });
 
     const totalPicked = lobby.teams.team1.length + lobby.teams.team2.length;
     const playersPerTeam = lobby.maxPlayers / 2;
