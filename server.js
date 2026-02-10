@@ -653,6 +653,28 @@ app.get('/api/matches/:playerId', (req, res) => {
   res.json(matches);
 });
 
+// Admin backup endpoint - download all data
+// Access: /api/admin/backup?key=YOUR_SECRET_KEY
+app.get('/api/admin/backup', (req, res) => {
+  const secretKey = req.query.key;
+  
+  // Simple secret key protection - change this!
+  if (secretKey !== 'counterpush-backup-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const backup = {
+    exportedAt: new Date().toISOString(),
+    players: db.getAllPlayers(),
+    matches: db.getRecentMatches(1000),
+    // Include raw data if needed
+  };
+  
+  res.setHeader('Content-Disposition', 'attachment; filename=counterpush-backup.json');
+  res.setHeader('Content-Type', 'application/json');
+  res.json(backup);
+});
+
 app.get('/api/lobby/:code', (req, res) => {
   const lobby = getLobby(req.params.code);
   if (!lobby) {
