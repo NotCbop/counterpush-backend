@@ -841,12 +841,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // New players can't join if lobby is full
-    if (lobby.players.length >= lobby.maxPlayers) {
-      socket.emit('error', { message: 'Lobby is full' });
-      return;
-    }
-
+    // No max player limit - purge will handle overflow
     const player = db.getOrCreatePlayer(userData.odiscordId, userData.username, userData.avatar);
     lobby.players.push(player);
     
@@ -909,12 +904,79 @@ io.on('connection', (socket) => {
       }
     }
 
+    // Check if we need to purge players
+    if (lobby.players.length > lobby.maxPlayers) {
+      lobby.phase = 'purging';
+      lobby.purgeData = {
+        originalCount: lobby.players.length,
+        targetCount: lobby.maxPlayers,
+        eliminated: []
+      };
+      io.to(lobby.id).emit('lobbyUpdate', lobby);
+      io.to(lobby.id).emit('purgeStart', { 
+        totalPlayers: lobby.players.length, 
+        targetPlayers: lobby.maxPlayers,
+        toEliminate: lobby.players.length - lobby.maxPlayers
+      });
+      
+      // Run purge after countdown (5 seconds for dramatic effect)
+      setTimeout(() => {
+        runPurge(lobby);
+      }, 5000);
+      
+      return;
+    }
+
     lobby.phase = 'captain-select';
     io.to(lobby.id).emit('lobbyUpdate', lobby);
     io.emit('lobbiesUpdate', getPublicLobbies());
     
     console.log(`Lobby ${lobbyId} started captain select`);
   });
+
+  // Purge function - randomly eliminates players
+  function runPurge(lobby) {
+    const toEliminate = lobby.players.length - lobby.maxPlayers;
+    const eliminated = [];
+    
+    // Don't eliminate the host
+    const eliminatablePlayers = lobby.players.filter(p => p.odiscordId !== lobby.host.odiscordId);
+    
+    for (let i = 0; i < toEliminate; i++) {
+      if (eliminatablePlayers.length === 0) break;
+      
+      const randomIndex = Math.floor(Math.random() * eliminatablePlayers.length);
+      const player = eliminatablePlayers.splice(randomIndex, 1)[0];
+      eliminated.push(player);
+      
+      // Remove from lobby
+      lobby.players = lobby.players.filter(p => p.odiscordId !== player.odiscordId);
+      db.clearUserSession(player.odiscordId);
+    }
+    
+    lobby.purgeData.eliminated = eliminated;
+    
+    // Send elimination events one by one with delay
+    eliminated.forEach((player, index) => {
+      setTimeout(() => {
+        io.to(lobby.id).emit('playerEliminated', { 
+          player, 
+          index: index + 1, 
+          total: eliminated.length 
+        });
+      }, index * 1000); // 1 second between each elimination
+    });
+    
+    // After all eliminations, transition to captain select
+    setTimeout(() => {
+      lobby.phase = 'captain-select';
+      delete lobby.purgeData;
+      io.to(lobby.id).emit('purgeComplete', { survivors: lobby.players });
+      io.to(lobby.id).emit('lobbyUpdate', lobby);
+      io.emit('lobbiesUpdate', getPublicLobbies());
+      console.log(`Lobby ${lobby.id} purge complete, ${eliminated.length} eliminated`);
+    }, eliminated.length * 1000 + 2000); // Wait for all eliminations + 2 seconds
+  }
 
   socket.on('selectCaptain', ({ lobbyId, odiscordId }) => {
     const lobby = getLobby(lobbyId);
