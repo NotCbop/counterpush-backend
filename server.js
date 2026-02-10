@@ -935,7 +935,7 @@ io.on('connection', (socket) => {
   });
 
   // Purge function - randomly eliminates players
-  function runPurge(lobby) {
+  async function runPurge(lobby) {
     const toEliminate = lobby.players.length - lobby.maxPlayers;
     const eliminated = [];
     
@@ -964,6 +964,9 @@ io.on('connection', (socket) => {
           index: index + 1, 
           total: eliminated.length 
         });
+        
+        // Move eliminated player to main VC
+        movePlayerToMainVC(player.odiscordId);
       }, index * 1000); // 1 second between each elimination
     });
     
@@ -976,6 +979,24 @@ io.on('connection', (socket) => {
       io.emit('lobbiesUpdate', getPublicLobbies());
       console.log(`Lobby ${lobby.id} purge complete, ${eliminated.length} eliminated`);
     }, eliminated.length * 1000 + 2000); // Wait for all eliminations + 2 seconds
+  }
+  
+  // Helper to move a single player to main VC
+  async function movePlayerToMainVC(odiscordId) {
+    if (!discordClient.isReady()) return;
+    
+    try {
+      const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+      if (!guild) return;
+      
+      const member = await guild.members.fetch(odiscordId).catch(() => null);
+      if (member && member.voice?.channel) {
+        await member.voice.setChannel(CONFIG.MAIN_VC_ID).catch(e => console.error('Move error:', e));
+        console.log(`Moved purged player ${member.user.username} to main VC`);
+      }
+    } catch (e) {
+      console.error('Error moving purged player to main VC:', e);
+    }
   }
 
   socket.on('selectCaptain', ({ lobbyId, odiscordId }) => {
