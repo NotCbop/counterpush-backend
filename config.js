@@ -37,7 +37,7 @@ module.exports = {
   MAX_CAPTAINS: 2,
 
   // ELO Settings
-  STARTING_ELO: 1000,
+  STARTING_ELO: 500,
 
   // Rank Thresholds (new tier system)
   RANKS: {

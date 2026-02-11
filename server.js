@@ -906,7 +906,7 @@ app.get('/api/admin/backup', (req, res) => {
 
 // Admin reset endpoint - reset all ELO and stats
 // Access: /api/admin/reset?key=YOUR_SECRET_KEY&confirm=yes
-app.post('/api/admin/reset', (req, res) => {
+app.get('/api/admin/reset', (req, res) => {
   const secretKey = req.query.key;
   const confirm = req.query.confirm;
   
@@ -916,8 +916,9 @@ app.post('/api/admin/reset', (req, res) => {
   
   if (confirm !== 'yes') {
     return res.status(400).json({ 
-      error: 'Please add ?confirm=yes to confirm reset',
-      warning: 'This will reset ALL player ELO and stats!'
+      error: 'Please add &confirm=yes to confirm reset',
+      warning: 'This will reset ALL player ELO and stats!',
+      url: '/api/admin/reset?key=counterpush-backup-2024&confirm=yes'
     });
   }
   
@@ -927,7 +928,7 @@ app.post('/api/admin/reset', (req, res) => {
   
   for (const player of players) {
     db.updatePlayer(player.odiscordId, {
-      elo: CONFIG.STARTING_ELO,
+      elo: 500, // Reset to 500 ELO
       wins: 0,
       losses: 0,
       gamesPlayed: 0,
@@ -954,7 +955,7 @@ app.post('/api/admin/reset', (req, res) => {
   
   res.json({ 
     success: true, 
-    message: `Reset ${resetCount} players to ${CONFIG.STARTING_ELO} ELO and cleared all matches`
+    message: `Reset ${resetCount} players to 500 ELO and cleared all matches`
   });
 });
 
