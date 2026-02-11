@@ -1257,11 +1257,12 @@ io.on('connection', (socket) => {
         // Start market mode
         lobby.phase = 'market';
         lobby.market = {
-          team1Budget: 1000,
-          team2Budget: 1000,
-          currentPlayer: null,
+          team1Budget: 500,
+          team2Budget: 500,
+          currentPlayers: [], // Now holds 2 players
           currentBids: { team1: 0, team2: 0 },
           timerEnd: null,
+          auctionTimeout: null,
           playersRemaining: lobby.players.filter(p => 
             !lobby.captains.some(c => c.odiscordId === p.odiscordId)
           )
@@ -1284,7 +1285,7 @@ io.on('connection', (socket) => {
     io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
   
-  // Market mode - start next player auction
+  // Market mode - start next player auction (double draft - 2 players at once)
   function startNextAuction(lobby) {
     if (lobby.market.playersRemaining.length === 0) {
       // All players auctioned, start playing
@@ -1293,48 +1294,66 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Pick random player
-    const randomIndex = Math.floor(Math.random() * lobby.market.playersRemaining.length);
-    const player = lobby.market.playersRemaining.splice(randomIndex, 1)[0];
+    // Pick 2 random players (or 1 if only 1 left)
+    const playersToAuction = [];
+    const numToSelect = Math.min(2, lobby.market.playersRemaining.length);
     
-    // Get player stats for display
-    const playerData = db.getPlayer(player.odiscordId);
-    const leaderboard = db.getLeaderboard(100);
-    const rank = leaderboard.findIndex(p => p.odiscordId === player.odiscordId) + 1;
+    for (let i = 0; i < numToSelect; i++) {
+      const randomIndex = Math.floor(Math.random() * lobby.market.playersRemaining.length);
+      const player = lobby.market.playersRemaining.splice(randomIndex, 1)[0];
+      
+      // Get player stats for display
+      const playerData = db.getPlayer(player.odiscordId);
+      const leaderboard = db.getLeaderboard(100);
+      const rank = leaderboard.findIndex(p => p.odiscordId === player.odiscordId) + 1;
+      
+      playersToAuction.push({
+        ...player,
+        elo: playerData?.elo || 1000,
+        kdr: playerData?.kdr || '0.00',
+        totalKills: playerData?.totalKills || 0,
+        totalDeaths: playerData?.totalDeaths || 0,
+        leaderboardRank: rank > 0 ? rank : 'Unranked',
+        rank: playerData?.rank || 'C'
+      });
+    }
     
-    lobby.market.currentPlayer = {
-      ...player,
-      elo: playerData?.elo || 1000,
-      kdr: playerData?.kdr || '0.00',
-      totalKills: playerData?.totalKills || 0,
-      totalDeaths: playerData?.totalDeaths || 0,
-      leaderboardRank: rank > 0 ? rank : 'Unranked',
-      rank: playerData?.rank || 'C'
-    };
+    lobby.market.currentPlayers = playersToAuction;
     lobby.market.currentBids = { team1: 0, team2: 0 };
-    lobby.market.timerEnd = Date.now() + 30000; // 30 seconds
+    lobby.market.timerEnd = Date.now() + 20000; // 20 seconds
+    
+    // Clear any existing timeout
+    if (lobby.market.auctionTimeout) {
+      clearTimeout(lobby.market.auctionTimeout);
+    }
+    
+    // Set timer to end auction
+    lobby.market.auctionTimeout = setTimeout(() => {
+      endAuction(lobby);
+    }, 20000);
     
     io.to(lobby.id).emit('lobbyUpdate', lobby);
     io.to(lobby.id).emit('auctionStart', { 
-      player: lobby.market.currentPlayer,
+      players: lobby.market.currentPlayers,
       timerEnd: lobby.market.timerEnd,
       team1Budget: lobby.market.team1Budget,
       team2Budget: lobby.market.team2Budget,
       playersRemaining: lobby.market.playersRemaining.length
     });
-    
-    // Set timer to end auction
-    setTimeout(() => {
-      endAuction(lobby);
-    }, 30000);
   }
   
   // Market mode - end current auction
   function endAuction(lobby) {
-    if (!lobby || lobby.phase !== 'market' || !lobby.market?.currentPlayer) return;
+    if (!lobby || lobby.phase !== 'market' || !lobby.market?.currentPlayers?.length) return;
+    
+    // Clear the timeout
+    if (lobby.market.auctionTimeout) {
+      clearTimeout(lobby.market.auctionTimeout);
+      lobby.market.auctionTimeout = null;
+    }
     
     const { team1: bid1, team2: bid2 } = lobby.market.currentBids;
-    const player = lobby.market.currentPlayer;
+    const players = lobby.market.currentPlayers;
     let winningTeam;
     
     if (bid1 > bid2) {
@@ -1351,15 +1370,17 @@ io.on('connection', (socket) => {
     // Deduct from budget
     lobby.market[`${winningTeam}Budget`] -= winningBid;
     
-    // Add player to team
-    lobby.teams[winningTeam].push(player);
+    // Add all players to winning team
+    for (const player of players) {
+      lobby.teams[winningTeam].push(player);
+    }
     
-    // Clear current player
-    lobby.market.currentPlayer = null;
+    // Clear current players
+    lobby.market.currentPlayers = [];
     lobby.market.currentBids = { team1: 0, team2: 0 };
     
     io.to(lobby.id).emit('auctionEnd', {
-      player,
+      players,
       winningTeam,
       winningBid,
       team1Budget: lobby.market.team1Budget,
@@ -1455,10 +1476,31 @@ io.on('connection', (socket) => {
     
     lobby.market.currentBids[team] = amount;
     
+    // Check if timer is under 5 seconds, extend to 5 if so
+    const timeRemaining = lobby.market.timerEnd - Date.now();
+    let timerExtended = false;
+    
+    if (timeRemaining < 5000 && timeRemaining > 0) {
+      // Clear existing timeout
+      if (lobby.market.auctionTimeout) {
+        clearTimeout(lobby.market.auctionTimeout);
+      }
+      
+      // Set new timer to 5 seconds
+      lobby.market.timerEnd = Date.now() + 5000;
+      lobby.market.auctionTimeout = setTimeout(() => {
+        endAuction(lobby);
+      }, 5000);
+      
+      timerExtended = true;
+    }
+    
     io.to(lobby.id).emit('bidUpdate', {
       team,
       amount,
-      currentBids: lobby.market.currentBids
+      currentBids: lobby.market.currentBids,
+      timerExtended,
+      newTimerEnd: timerExtended ? lobby.market.timerEnd : null
     });
   });
 
