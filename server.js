@@ -117,6 +117,12 @@ discordClient.once('ready', async () => {
         ]
       });
       
+      await guild.commands.create({
+        name: 'closelobbies',
+        description: 'Close all active lobbies (moderator only)',
+        options: []
+      });
+      
       console.log('Slash commands registered');
     }
   } catch (e) {
@@ -333,6 +339,35 @@ discordClient.on('interactionCreate', async (interaction) => {
     const declaredBy = isModerator && lobby.host.odiscordId !== odiscordId ? 'Moderator' : 'Host';
     await interaction.reply({ 
       content: `✅ Lobby **${code}** declared as a **draw** by ${declaredBy}. No ELO changes.`, 
+      ephemeral: true 
+    });
+  }
+  
+  if (interaction.commandName === 'closelobbies') {
+    // Only moderators can use this command
+    if (!isModerator) {
+      await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+      return;
+    }
+    
+    const lobbyCount = lobbies.size;
+    
+    if (lobbyCount === 0) {
+      await interaction.reply({ content: '✅ No active lobbies to close.', ephemeral: true });
+      return;
+    }
+    
+    // Close all lobbies
+    const lobbyCodes = Array.from(lobbies.keys());
+    for (const code of lobbyCodes) {
+      io.to(code).emit('lobbyClosed', { reason: 'All lobbies closed by moderator' });
+      await deleteLobby(code);
+    }
+    
+    io.emit('lobbiesUpdate', getPublicLobbies());
+    
+    await interaction.reply({ 
+      content: `✅ Closed **${lobbyCount}** lobby(s).`, 
       ephemeral: true 
     });
   }
@@ -579,9 +614,12 @@ async function movePlayersToMainVC(lobby) {
     
     const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
     
+    // Only move players who are in this lobby's VCs
+    const lobbyVCs = [lobby.lobbyVCId, lobby.team1VCId, lobby.team2VCId].filter(Boolean);
+    
     for (const player of allPlayers) {
       const member = await guild.members.fetch(player.odiscordId).catch(() => null);
-      if (member && member.voice?.channel) {
+      if (member && member.voice?.channel && lobbyVCs.includes(member.voice.channelId)) {
         await member.voice.setChannel(CONFIG.MAIN_VC_ID).catch(e => console.error('Move error:', e));
       }
     }
@@ -684,6 +722,7 @@ async function sendMatchResultToDiscord(lobby, results) {
 
 const lobbies = new Map();
 const purgeImmunity = new Set(); // Players who were purged and are immune next time
+const dailyImmunity = new Map(); // Discord ID -> timestamp when immunity expires (5 hour cooldown)
 
 function generateLobbyCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -694,7 +733,7 @@ function generateLobbyCode() {
   return code;
 }
 
-function createLobby(hostId, hostData, maxPlayers, isPublic = false, draftMode = 'draft') {
+function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
   let code;
   do {
     code = generateLobbyCode();
@@ -714,9 +753,6 @@ function createLobby(hostId, hostData, maxPlayers, isPublic = false, draftMode =
     picksLeft: 0,
     score: { team1: 0, team2: 0 },
     isPublic,
-    draftMode, // 'draft' or 'market'
-    // Market mode data
-    market: null,
     lobbyVCId: null,
     team1VCId: null,
     team2VCId: null,
@@ -726,7 +762,7 @@ function createLobby(hostId, hostData, maxPlayers, isPublic = false, draftMode =
   lobbies.set(code, lobby);
   db.setUserSession(hostId, code);
   
-  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic}, mode: ${draftMode})`);
+  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic})`);
   return lobby;
 }
 
@@ -759,9 +795,12 @@ async function moveAllPlayersToMainVC(lobby) {
     const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
     if (!guild) return;
     
+    // Only move players who are in this lobby's VCs
+    const lobbyVCs = [lobby.lobbyVCId, lobby.team1VCId, lobby.team2VCId].filter(Boolean);
+    
     for (const player of lobby.players) {
       const member = await guild.members.fetch(player.odiscordId).catch(() => null);
-      if (member && member.voice?.channel) {
+      if (member && member.voice?.channel && lobbyVCs.includes(member.voice.channelId)) {
         await member.voice.setChannel(CONFIG.MAIN_VC_ID).catch(e => console.error('Move error:', e));
       }
     }
@@ -813,6 +852,26 @@ app.get('/api/players', (req, res) => {
   res.json(players);
 });
 
+// Player search endpoint for autocomplete
+app.get('/api/players/search/:query', (req, res) => {
+  const query = req.params.query.toLowerCase();
+  const players = db.getAllPlayers();
+  
+  // Filter players by username (case-insensitive partial match)
+  const matches = players
+    .filter(p => p.username.toLowerCase().includes(query))
+    .slice(0, 10) // Limit to 10 results
+    .map(p => ({
+      odiscordId: p.odiscordId,
+      username: p.username,
+      avatar: p.avatar,
+      elo: p.elo,
+      rank: p.rank
+    }));
+  
+  res.json(matches);
+});
+
 app.get('/api/matches', (req, res) => {
   const matches = db.getRecentMatches(20);
   res.json(matches);
@@ -843,6 +902,60 @@ app.get('/api/admin/backup', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename=counterpush-backup.json');
   res.setHeader('Content-Type', 'application/json');
   res.json(backup);
+});
+
+// Admin reset endpoint - reset all ELO and stats
+// Access: /api/admin/reset?key=YOUR_SECRET_KEY&confirm=yes
+app.post('/api/admin/reset', (req, res) => {
+  const secretKey = req.query.key;
+  const confirm = req.query.confirm;
+  
+  if (secretKey !== 'counterpush-backup-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  if (confirm !== 'yes') {
+    return res.status(400).json({ 
+      error: 'Please add ?confirm=yes to confirm reset',
+      warning: 'This will reset ALL player ELO and stats!'
+    });
+  }
+  
+  // Reset all players
+  const players = db.getAllPlayers();
+  let resetCount = 0;
+  
+  for (const player of players) {
+    db.updatePlayer(player.odiscordId, {
+      elo: CONFIG.STARTING_ELO,
+      wins: 0,
+      losses: 0,
+      gamesPlayed: 0,
+      totalKills: 0,
+      totalDeaths: 0,
+      totalAssists: 0,
+      totalDamage: 0,
+      totalHealing: 0,
+      classStats: {
+        Tank: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Brawler: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Sniper: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Trickster: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Support: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 }
+      }
+    });
+    resetCount++;
+  }
+  
+  // Clear matches
+  db.clearAllMatches();
+  
+  console.log(`[ADMIN] Reset ${resetCount} players and cleared all matches`);
+  
+  res.json({ 
+    success: true, 
+    message: `Reset ${resetCount} players to ${CONFIG.STARTING_ELO} ELO and cleared all matches`
+  });
 });
 
 app.get('/api/lobby/:code', (req, res) => {
@@ -897,6 +1010,22 @@ async function fetchMinecraftStats(uuid) {
     return data;
   } catch (e) {
     console.error('Error fetching Minecraft stats:', e);
+    return null;
+  }
+}
+
+// Fetch player's current class from Minecraft server
+async function fetchPlayerClass(uuid) {
+  try {
+    const formattedUuid = uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    const response = await fetch(`${CONFIG.MINECRAFT_STATS_URL}/class/${formattedUuid}`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    // Convert class ID to name
+    const classNames = { 1: 'Tank', 2: 'Brawler', 3: 'Sniper', 4: 'Trickster', 5: 'Support' };
+    return classNames[data.classId] || null;
+  } catch (e) {
+    console.error('Error fetching player class:', e);
     return null;
   }
 }
@@ -964,8 +1093,8 @@ io.on('connection', (socket) => {
     socket.emit('noSession');
   });
 
-  socket.on('createLobby', async ({ userData, maxPlayers, isPublic, draftMode }) => {
-    console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic, draftMode });
+  socket.on('createLobby', async ({ userData, maxPlayers, isPublic }) => {
+    console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic });
     
     // Check if user is already hosting a lobby
     for (const [code, existingLobby] of lobbies) {
@@ -985,7 +1114,7 @@ io.on('connection', (socket) => {
       }
     }
     
-    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false, draftMode || 'draft');
+    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
     
     // Create lobby VC if public
     if (isPublic) {
@@ -1135,23 +1264,51 @@ io.on('connection', (socket) => {
     const toEliminate = lobby.players.length - lobby.maxPlayers;
     const eliminated = [];
     
-    // Don't eliminate the host OR players with immunity
+    const now = Date.now();
+    const FIVE_HOURS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
+    
+    // Check for daily immunity (first game of day - 5 hour cooldown)
+    const dailyImmunePlayers = lobby.players.filter(p => {
+      const immuneUntil = dailyImmunity.get(p.odiscordId);
+      // If no entry or expired, they have daily immunity
+      return !immuneUntil || immuneUntil < now;
+    });
+    
+    // Don't eliminate the host OR players with purge immunity OR players with daily immunity
     const immunePlayers = lobby.players.filter(p => purgeImmunity.has(p.odiscordId));
-    const eliminatablePlayers = lobby.players.filter(p => 
-      p.odiscordId !== lobby.host.odiscordId && !purgeImmunity.has(p.odiscordId)
+    const allImmunePlayers = lobby.players.filter(p => 
+      purgeImmunity.has(p.odiscordId) || dailyImmunePlayers.includes(p)
     );
     
-    // Clear immunity for players in this lobby (they used it)
+    const eliminatablePlayers = lobby.players.filter(p => 
+      p.odiscordId !== lobby.host.odiscordId && 
+      !purgeImmunity.has(p.odiscordId) &&
+      !dailyImmunePlayers.includes(p)
+    );
+    
+    // Clear purge immunity for players who used it
     immunePlayers.forEach(p => {
       purgeImmunity.delete(p.odiscordId);
       console.log(`${p.username} used their purge immunity`);
     });
     
-    // Notify immune players
-    if (immunePlayers.length > 0) {
-      io.to(lobby.id).emit('immunityUsed', { 
-        players: immunePlayers.map(p => ({ odiscordId: p.odiscordId, username: p.username }))
-      });
+    // Set daily immunity cooldown for players who used it (5 hour cooldown)
+    dailyImmunePlayers.forEach(p => {
+      dailyImmunity.set(p.odiscordId, now + FIVE_HOURS);
+      console.log(`${p.username} used their first-game immunity (next available in 5 hours)`);
+    });
+    
+    // Notify immune players (combine both types)
+    const immuneNotifications = [];
+    immunePlayers.forEach(p => {
+      immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'purge' });
+    });
+    dailyImmunePlayers.filter(p => !immunePlayers.some(ip => ip.odiscordId === p.odiscordId)).forEach(p => {
+      immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'daily' });
+    });
+    
+    if (immuneNotifications.length > 0) {
+      io.to(lobby.id).emit('immunityUsed', { players: immuneNotifications });
     }
     
     for (let i = 0; i < toEliminate; i++) {
@@ -1165,12 +1322,15 @@ io.on('connection', (socket) => {
       lobby.players = lobby.players.filter(p => p.odiscordId !== player.odiscordId);
       db.clearUserSession(player.odiscordId);
       
-      // Grant immunity for next lobby
+      // Grant purge immunity for next lobby
       purgeImmunity.add(player.odiscordId);
       console.log(`${player.username} was purged and granted immunity for next lobby`);
     }
     
     lobby.purgeData.eliminated = eliminated;
+    
+    // Get lobby VC IDs for checking
+    const lobbyVCId = lobby.lobbyVCId;
     
     // Send elimination events one by one with delay
     eliminated.forEach((player, index) => {
@@ -1182,8 +1342,8 @@ io.on('connection', (socket) => {
           hasImmunity: true // Let them know they have immunity next time
         });
         
-        // Move eliminated player to main VC
-        movePlayerToMainVC(player.odiscordId);
+        // Move eliminated player to main VC (only if in lobby VC)
+        movePlayerToMainVC(player.odiscordId, lobbyVCId);
       }, index * 1000); // 1 second between each elimination
     });
     
@@ -1198,8 +1358,8 @@ io.on('connection', (socket) => {
     }, eliminated.length * 1000 + 2000); // Wait for all eliminations + 2 seconds
   }
   
-  // Helper to move a single player to main VC
-  async function movePlayerToMainVC(odiscordId) {
+  // Helper to move a single player to main VC (only if in specific VC)
+  async function movePlayerToMainVC(odiscordId, fromVCId) {
     if (!discordClient.isReady()) return;
     
     try {
@@ -1207,7 +1367,8 @@ io.on('connection', (socket) => {
       if (!guild) return;
       
       const member = await guild.members.fetch(odiscordId).catch(() => null);
-      if (member && member.voice?.channel) {
+      // Only move if they're in the lobby VC
+      if (member && member.voice?.channelId === fromVCId) {
         await member.voice.setChannel(CONFIG.MAIN_VC_ID).catch(e => console.error('Move error:', e));
         console.log(`Moved purged player ${member.user.username} to main VC`);
       }
@@ -1252,256 +1413,13 @@ io.on('connection', (socket) => {
     } else if (lobby.captains.length === 2) {
       lobby.teams.team2.push(player);
       
-      // Check draft mode
-      if (lobby.draftMode === 'market') {
-        // Start market mode
-        lobby.phase = 'market';
-        lobby.market = {
-          team1Budget: 500,
-          team2Budget: 500,
-          currentPlayers: [], // Now holds 2 players
-          currentBids: { team1: 0, team2: 0 },
-          timerEnd: null,
-          auctionTimeout: null,
-          playersRemaining: lobby.players.filter(p => 
-            !lobby.captains.some(c => c.odiscordId === p.odiscordId)
-          )
-        };
-        
-        // Send initial update, then start first auction after brief delay
-        io.to(lobby.id).emit('lobbyUpdate', lobby);
-        setTimeout(() => {
-          startNextAuction(lobby);
-        }, 1000);
-        return; // Don't send another lobbyUpdate below
-      } else {
-        // Normal draft mode
-        lobby.phase = 'drafting';
-        lobby.currentTurn = 'team1';
-        lobby.picksLeft = 1;
-      }
+      // Start draft mode
+      lobby.phase = 'drafting';
+      lobby.currentTurn = 'team1';
+      lobby.picksLeft = 1;
     }
 
     io.to(lobby.id).emit('lobbyUpdate', lobby);
-  });
-  
-  // Market mode - start next player auction (double draft - 2 players at once)
-  function startNextAuction(lobby) {
-    if (lobby.market.playersRemaining.length === 0) {
-      // All players auctioned, start playing
-      startPlaying(lobby);
-      io.to(lobby.id).emit('lobbyUpdate', lobby);
-      return;
-    }
-    
-    // Pick 2 random players (or 1 if only 1 left)
-    const playersToAuction = [];
-    const numToSelect = Math.min(2, lobby.market.playersRemaining.length);
-    
-    for (let i = 0; i < numToSelect; i++) {
-      const randomIndex = Math.floor(Math.random() * lobby.market.playersRemaining.length);
-      const player = lobby.market.playersRemaining.splice(randomIndex, 1)[0];
-      
-      // Get player stats for display
-      const playerData = db.getPlayer(player.odiscordId);
-      const leaderboard = db.getLeaderboard(100);
-      const rank = leaderboard.findIndex(p => p.odiscordId === player.odiscordId) + 1;
-      
-      playersToAuction.push({
-        ...player,
-        elo: playerData?.elo || 1000,
-        kdr: playerData?.kdr || '0.00',
-        totalKills: playerData?.totalKills || 0,
-        totalDeaths: playerData?.totalDeaths || 0,
-        leaderboardRank: rank > 0 ? rank : 'Unranked',
-        rank: playerData?.rank || 'C'
-      });
-    }
-    
-    lobby.market.currentPlayers = playersToAuction;
-    lobby.market.currentBids = { team1: 0, team2: 0 };
-    lobby.market.timerEnd = Date.now() + 20000; // 20 seconds
-    
-    // Clear any existing timeout
-    if (lobby.market.auctionTimeout) {
-      clearTimeout(lobby.market.auctionTimeout);
-    }
-    
-    // Set timer to end auction
-    lobby.market.auctionTimeout = setTimeout(() => {
-      endAuction(lobby);
-    }, 20000);
-    
-    io.to(lobby.id).emit('lobbyUpdate', lobby);
-    io.to(lobby.id).emit('auctionStart', { 
-      players: lobby.market.currentPlayers,
-      timerEnd: lobby.market.timerEnd,
-      team1Budget: lobby.market.team1Budget,
-      team2Budget: lobby.market.team2Budget,
-      playersRemaining: lobby.market.playersRemaining.length
-    });
-  }
-  
-  // Market mode - end current auction
-  function endAuction(lobby) {
-    if (!lobby || lobby.phase !== 'market' || !lobby.market?.currentPlayers?.length) return;
-    
-    // Clear the timeout
-    if (lobby.market.auctionTimeout) {
-      clearTimeout(lobby.market.auctionTimeout);
-      lobby.market.auctionTimeout = null;
-    }
-    
-    const { team1: bid1, team2: bid2 } = lobby.market.currentBids;
-    const players = lobby.market.currentPlayers;
-    let winningTeam;
-    
-    if (bid1 > bid2) {
-      winningTeam = 'team1';
-    } else if (bid2 > bid1) {
-      winningTeam = 'team2';
-    } else {
-      // Tie - random winner
-      winningTeam = Math.random() < 0.5 ? 'team1' : 'team2';
-    }
-    
-    const winningBid = winningTeam === 'team1' ? bid1 : bid2;
-    
-    // Deduct from budget
-    lobby.market[`${winningTeam}Budget`] -= winningBid;
-    
-    // Add all players to winning team
-    for (const player of players) {
-      lobby.teams[winningTeam].push(player);
-    }
-    
-    // Clear current players
-    lobby.market.currentPlayers = [];
-    lobby.market.currentBids = { team1: 0, team2: 0 };
-    
-    io.to(lobby.id).emit('auctionEnd', {
-      players,
-      winningTeam,
-      winningBid,
-      team1Budget: lobby.market.team1Budget,
-      team2Budget: lobby.market.team2Budget
-    });
-    
-    // Send updated lobby state
-    io.to(lobby.id).emit('lobbyUpdate', lobby);
-    
-    // Check if teams are full
-    const playersPerTeam = lobby.maxPlayers / 2;
-    if (lobby.teams.team1.length >= playersPerTeam && lobby.teams.team2.length >= playersPerTeam) {
-      // Both teams full, start playing
-      setTimeout(() => {
-        startPlaying(lobby);
-        io.to(lobby.id).emit('lobbyUpdate', lobby);
-      }, 2000);
-      return;
-    }
-    
-    // Check if one team is full
-    if (lobby.teams.team1.length >= playersPerTeam) {
-      // Give remaining players to team2
-      while (lobby.market.playersRemaining.length > 0) {
-        const p = lobby.market.playersRemaining.pop();
-        lobby.teams.team2.push(p);
-      }
-      setTimeout(() => {
-        startPlaying(lobby);
-        io.to(lobby.id).emit('lobbyUpdate', lobby);
-      }, 2000);
-      return;
-    }
-    
-    if (lobby.teams.team2.length >= playersPerTeam) {
-      // Give remaining players to team1
-      while (lobby.market.playersRemaining.length > 0) {
-        const p = lobby.market.playersRemaining.pop();
-        lobby.teams.team1.push(p);
-      }
-      setTimeout(() => {
-        startPlaying(lobby);
-        io.to(lobby.id).emit('lobbyUpdate', lobby);
-      }, 2000);
-      return;
-    }
-    
-    // Start next auction after delay
-    setTimeout(() => {
-      startNextAuction(lobby);
-    }, 2000);
-  }
-  
-  // Market mode - place bid
-  socket.on('placeBid', ({ lobbyId, amount }) => {
-    const lobby = getLobby(lobbyId);
-    
-    if (!lobby || lobby.phase !== 'market') {
-      socket.emit('error', { message: 'Not in market phase' });
-      return;
-    }
-    
-    // Determine which team the bidder is captain of
-    const isCaptain1 = lobby.teams.team1[0]?.odiscordId === socket.odiscordId;
-    const isCaptain2 = lobby.teams.team2[0]?.odiscordId === socket.odiscordId;
-    
-    if (!isCaptain1 && !isCaptain2) {
-      socket.emit('error', { message: 'Only captains can bid' });
-      return;
-    }
-    
-    const team = isCaptain1 ? 'team1' : 'team2';
-    const budget = lobby.market[`${team}Budget`];
-    
-    if (amount > budget) {
-      socket.emit('error', { message: 'Not enough budget' });
-      return;
-    }
-    
-    if (amount < 0) {
-      socket.emit('error', { message: 'Invalid bid amount' });
-      return;
-    }
-    
-    // Must bid higher than current bid (or match if other team hasn't bid)
-    const otherTeam = team === 'team1' ? 'team2' : 'team1';
-    const otherBid = lobby.market.currentBids[otherTeam];
-    
-    if (amount <= lobby.market.currentBids[team] && amount <= otherBid && otherBid > 0) {
-      socket.emit('error', { message: 'Must bid higher' });
-      return;
-    }
-    
-    lobby.market.currentBids[team] = amount;
-    
-    // Check if timer is under 5 seconds, extend to 5 if so
-    const timeRemaining = lobby.market.timerEnd - Date.now();
-    let timerExtended = false;
-    
-    if (timeRemaining < 5000 && timeRemaining > 0) {
-      // Clear existing timeout
-      if (lobby.market.auctionTimeout) {
-        clearTimeout(lobby.market.auctionTimeout);
-      }
-      
-      // Set new timer to 5 seconds
-      lobby.market.timerEnd = Date.now() + 5000;
-      lobby.market.auctionTimeout = setTimeout(() => {
-        endAuction(lobby);
-      }, 5000);
-      
-      timerExtended = true;
-    }
-    
-    io.to(lobby.id).emit('bidUpdate', {
-      team,
-      amount,
-      currentBids: lobby.market.currentBids,
-      timerExtended,
-      newTimerEnd: timerExtended ? lobby.market.timerEnd : null
-    });
   });
 
   socket.on('removeCaptain', ({ lobbyId, odiscordId }) => {
@@ -1756,27 +1674,54 @@ io.on('connection', (socket) => {
     const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
     const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
 
-    // Fetch Minecraft stats for all players (for display only, doesn't affect ELO)
+    // Fetch Minecraft stats and class for all players
     const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
     const playerStats = {};
+    const playerClasses = {};
     
     for (const player of allPlayers) {
       const mcLink = db.getMinecraftByDiscord(player.odiscordId);
       if (mcLink) {
         const stats = await fetchMinecraftStats(mcLink.uuid);
+        const playerClass = await fetchPlayerClass(mcLink.uuid);
+        
         if (stats) {
           playerStats[player.odiscordId] = stats;
+          playerClasses[player.odiscordId] = playerClass || 'Unknown';
           
           // Update lifetime stats
           const currentPlayer = db.getPlayer(player.odiscordId);
           if (currentPlayer) {
-            db.updatePlayer(player.odiscordId, {
+            const updateData = {
               totalKills: (currentPlayer.totalKills || 0) + (stats.kills || 0),
               totalDeaths: (currentPlayer.totalDeaths || 0) + (stats.deaths || 0),
               totalAssists: (currentPlayer.totalAssists || 0) + (stats.assists || 0),
               totalDamage: (currentPlayer.totalDamage || 0) + (stats.damage || 0),
               totalHealing: (currentPlayer.totalHealing || 0) + (stats.healing || 0)
-            });
+            };
+            
+            // Update class-specific stats
+            if (playerClass && currentPlayer.classStats) {
+              const classStats = currentPlayer.classStats[playerClass] || { 
+                kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 
+              };
+              const isWinner = winnerIds.includes(player.odiscordId);
+              
+              updateData.classStats = {
+                ...currentPlayer.classStats,
+                [playerClass]: {
+                  kills: classStats.kills + (stats.kills || 0),
+                  deaths: classStats.deaths + (stats.deaths || 0),
+                  assists: classStats.assists + (stats.assists || 0),
+                  damage: classStats.damage + (stats.damage || 0),
+                  healing: classStats.healing + (stats.healing || 0),
+                  gamesPlayed: classStats.gamesPlayed + 1,
+                  wins: classStats.wins + (isWinner ? 1 : 0)
+                }
+              };
+            }
+            
+            db.updatePlayer(player.odiscordId, updateData);
           }
         }
       }
@@ -1785,12 +1730,14 @@ io.on('connection', (socket) => {
     // Calculate ELO (not affected by stats)
     const results = db.processMatchResult(winnerIds, loserIds, lobby.id);
     
-    // Add stats to results for display
+    // Add stats and class to results for display
     for (const player of results.winners) {
       player.stats = playerStats[player.odiscordId] || null;
+      player.class = playerClasses[player.odiscordId] || null;
     }
     for (const player of results.losers) {
       player.stats = playerStats[player.odiscordId] || null;
+      player.class = playerClasses[player.odiscordId] || null;
     }
     
     lobby.eloResults = results;

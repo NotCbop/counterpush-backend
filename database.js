@@ -213,6 +213,11 @@ function getRecentMatches(limit = 20) {
   return matches.slice(0, limit);
 }
 
+function clearAllMatches() {
+  saveMatches([]);
+  console.log('All matches cleared');
+}
+
 // ===========================================
 // PLAYER MANAGEMENT
 // ===========================================
@@ -251,6 +256,14 @@ function getOrCreatePlayer(odiscordId, username, avatar) {
       totalAssists: 0,
       totalDamage: 0,
       totalHealing: 0,
+      // Class-based stats
+      classStats: {
+        Tank: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Brawler: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Sniper: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Trickster: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Support: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 }
+      },
       createdAt: Date.now()
     };
   } else {
@@ -263,6 +276,16 @@ function getOrCreatePlayer(odiscordId, username, avatar) {
       db[odiscordId].totalAssists = 0;
       db[odiscordId].totalDamage = 0;
       db[odiscordId].totalHealing = 0;
+    }
+    // Ensure class stats exist for older players
+    if (!db[odiscordId].classStats) {
+      db[odiscordId].classStats = {
+        Tank: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Brawler: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Sniper: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Trickster: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+        Support: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 }
+      };
     }
   }
   
@@ -391,12 +414,13 @@ function processMatchResult(winnerIds, loserIds, lobbyId) {
 // ===========================================
 
 function getRank(elo) {
-  if (elo >= CONFIG.RANKS.S) return 'S';
-  if (elo >= CONFIG.RANKS.A) return 'A';
-  if (elo >= CONFIG.RANKS.B) return 'B';
-  if (elo >= CONFIG.RANKS.C) return 'C';
-  if (elo >= CONFIG.RANKS.D) return 'D';
-  return 'F';
+  if (elo >= CONFIG.RANKS.Netherite) return 'Netherite';
+  if (elo >= CONFIG.RANKS.Diamond) return 'Diamond';
+  if (elo >= CONFIG.RANKS.Amethyst) return 'Amethyst';
+  if (elo >= CONFIG.RANKS.Emerald) return 'Emerald';
+  if (elo >= CONFIG.RANKS.Gold) return 'Gold';
+  if (elo >= CONFIG.RANKS.Iron) return 'Iron';
+  return 'Copper';
 }
 
 // ===========================================
@@ -433,6 +457,7 @@ module.exports = {
   getPlayerMatches,
   getRecentMatches,
   saveMatch,
+  clearAllMatches,
   // Minecraft linking
   linkMinecraft,
   getMinecraftByDiscord,

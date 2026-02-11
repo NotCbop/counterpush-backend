@@ -21,14 +21,15 @@ module.exports = {
   // ELO K-Factor (doubled for faster ranking)
   K_FACTOR: 64,
 
-  // Rank Role IDs
+  // Rank Role IDs (new tier system)
   RANK_ROLES: {
-    S: process.env.RANK_ROLE_S || '1468774139660865774',
-    A: process.env.RANK_ROLE_A || '1468774162779607080',
-    B: process.env.RANK_ROLE_B || '1468774170740523160',
-    C: process.env.RANK_ROLE_C || '1468774177053081783',
-    D: process.env.RANK_ROLE_D || '1468774289611428003',
-    F: process.env.RANK_ROLE_F || '1468774185701736599'
+    Netherite: '1471270947381051603',
+    Diamond: '1471270840975757527',
+    Amethyst: '1471270735673557353',
+    Emerald: '1471270594329837762',
+    Gold: '1471270344504377366',
+    Iron: '1471270348249895014',
+    Copper: '1471270220659167242'
   },
 
   // Lobby Settings
@@ -38,14 +39,24 @@ module.exports = {
   // ELO Settings
   STARTING_ELO: 1000,
 
-  // Rank Thresholds
+  // Rank Thresholds (new tier system)
   RANKS: {
-    S: 1400,
-    A: 1250,
-    B: 1100,
-    C: 950,
-    D: 800,
-    F: 0
+    Netherite: 1500,
+    Diamond: 1300,
+    Amethyst: 1150,
+    Emerald: 1000,
+    Gold: 850,
+    Iron: 700,
+    Copper: 0
+  },
+
+  // Class IDs (from Skript)
+  CLASSES: {
+    1: 'Tank',
+    2: 'Brawler',
+    3: 'Sniper',
+    4: 'Trickster',
+    5: 'Support'
   },
 
   // Frontend URL (for CORS)
