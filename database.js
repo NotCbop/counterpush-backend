@@ -1,220 +1,138 @@
-const fs = require('fs');
-const path = require('path');
+const { MongoClient } = require('mongodb');
 const CONFIG = require('./config');
 
-const DB_PATH = path.join(__dirname, 'data', 'players.json');
-const SESSIONS_PATH = path.join(__dirname, 'data', 'sessions.json');
-const MATCHES_PATH = path.join(__dirname, 'data', 'matches.json');
-const LINKS_PATH = path.join(__dirname, 'data', 'minecraft_links.json');
+// MongoDB connection
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb+srv://username:password@cluster.mongodb.net/counterpush?retryWrites=true&w=majority';
+let db = null;
+let client = null;
 
-// Ensure data directory exists
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-// ===========================================
-// LOAD AND SAVE
-// ===========================================
-
-function loadDatabase() {
+// Connect to MongoDB
+async function connectDB() {
+  if (db) return db;
+  
   try {
-    if (fs.existsSync(DB_PATH)) {
-      const data = fs.readFileSync(DB_PATH, 'utf8');
-      return JSON.parse(data);
-    }
+    client = new MongoClient(MONGO_URI);
+    await client.connect();
+    db = client.db('counterpush');
+    console.log('Connected to MongoDB');
+    
+    // Create indexes for better performance
+    await db.collection('players').createIndex({ odiscordId: 1 }, { unique: true });
+    await db.collection('players').createIndex({ elo: -1 });
+    await db.collection('matches').createIndex({ timestamp: -1 });
+    await db.collection('sessions').createIndex({ odiscordId: 1 });
+    await db.collection('minecraft_links').createIndex({ odiscordId: 1 }, { unique: true });
+    await db.collection('minecraft_links').createIndex({ uuid: 1 });
+    
+    return db;
   } catch (error) {
-    console.error('Error loading database:', error);
-  }
-  return {};
-}
-
-function saveDatabase(data) {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Error saving database:', error);
+    console.error('MongoDB connection error:', error);
+    throw error;
   }
 }
+
+// Initialize connection on module load
+connectDB().catch(console.error);
 
 // ===========================================
 // MINECRAFT LINKS
 // ===========================================
 
-function loadLinks() {
-  try {
-    if (fs.existsSync(LINKS_PATH)) {
-      const data = fs.readFileSync(LINKS_PATH, 'utf8');
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error('Error loading links:', error);
-  }
-  return { byDiscord: {}, byUUID: {} };
+async function linkMinecraft(odiscordId, uuid, username) {
+  const database = await connectDB();
+  await database.collection('minecraft_links').updateOne(
+    { odiscordId },
+    { $set: { odiscordId, uuid, username, linkedAt: Date.now() } },
+    { upsert: true }
+  );
 }
 
-function saveLinks(data) {
-  try {
-    fs.writeFileSync(LINKS_PATH, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Error saving links:', error);
-  }
+async function getMinecraftByDiscord(odiscordId) {
+  const database = await connectDB();
+  return database.collection('minecraft_links').findOne({ odiscordId });
 }
 
-function linkMinecraft(discordId, uuid, username) {
-  const links = loadLinks();
-  
-  // Remove old links if they exist
-  if (links.byDiscord[discordId]) {
-    const oldUUID = links.byDiscord[discordId].uuid;
-    delete links.byUUID[oldUUID];
-  }
-  if (links.byUUID[uuid]) {
-    const oldDiscord = links.byUUID[uuid].discordId;
-    delete links.byDiscord[oldDiscord];
-  }
-  
-  // Create new link
-  links.byDiscord[discordId] = { uuid, username, linkedAt: Date.now() };
-  links.byUUID[uuid] = { discordId, username, linkedAt: Date.now() };
-  
-  saveLinks(links);
-  return true;
+async function getDiscordByMinecraft(uuid) {
+  const database = await connectDB();
+  return database.collection('minecraft_links').findOne({ uuid });
 }
 
-function getMinecraftByDiscord(discordId) {
-  const links = loadLinks();
-  return links.byDiscord[discordId] || null;
-}
-
-function getDiscordByMinecraft(uuid) {
-  const links = loadLinks();
-  return links.byUUID[uuid] || null;
-}
-
-function unlinkMinecraft(discordId) {
-  const links = loadLinks();
-  if (links.byDiscord[discordId]) {
-    const uuid = links.byDiscord[discordId].uuid;
-    delete links.byUUID[uuid];
-    delete links.byDiscord[discordId];
-    saveLinks(links);
-    return true;
-  }
-  return false;
+async function unlinkMinecraft(odiscordId) {
+  const database = await connectDB();
+  const result = await database.collection('minecraft_links').deleteOne({ odiscordId });
+  return result.deletedCount > 0;
 }
 
 // ===========================================
-// SESSION MANAGEMENT
+// SESSIONS
 // ===========================================
 
-function loadSessions() {
-  try {
-    if (fs.existsSync(SESSIONS_PATH)) {
-      const data = fs.readFileSync(SESSIONS_PATH, 'utf8');
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error('Error loading sessions:', error);
-  }
-  return {};
+async function setUserSession(odiscordId, lobbyId) {
+  const database = await connectDB();
+  await database.collection('sessions').updateOne(
+    { odiscordId },
+    { $set: { odiscordId, lobbyId, updatedAt: Date.now() } },
+    { upsert: true }
+  );
 }
 
-function saveSessions(data) {
-  try {
-    fs.writeFileSync(SESSIONS_PATH, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Error saving sessions:', error);
-  }
+async function getUserSession(odiscordId) {
+  const database = await connectDB();
+  return database.collection('sessions').findOne({ odiscordId });
 }
 
-function setUserSession(odiscordId, lobbyId) {
-  const sessions = loadSessions();
-  sessions[odiscordId] = { lobbyId, timestamp: Date.now() };
-  saveSessions(sessions);
+async function clearUserSession(odiscordId) {
+  const database = await connectDB();
+  await database.collection('sessions').deleteOne({ odiscordId });
 }
 
-function getUserSession(odiscordId) {
-  const sessions = loadSessions();
-  return sessions[odiscordId] || null;
-}
-
-function clearUserSession(odiscordId) {
-  const sessions = loadSessions();
-  delete sessions[odiscordId];
-  saveSessions(sessions);
-}
-
-function clearLobbySession(lobbyId) {
-  const sessions = loadSessions();
-  for (const odiscordId of Object.keys(sessions)) {
-    if (sessions[odiscordId].lobbyId === lobbyId) {
-      delete sessions[odiscordId];
-    }
-  }
-  saveSessions(sessions);
+async function clearLobbySession(lobbyId) {
+  const database = await connectDB();
+  await database.collection('sessions').deleteMany({ lobbyId });
 }
 
 // ===========================================
-// MATCH HISTORY
+// MATCHES
 // ===========================================
 
-function loadMatches() {
-  try {
-    if (fs.existsSync(MATCHES_PATH)) {
-      const data = fs.readFileSync(MATCHES_PATH, 'utf8');
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error('Error loading matches:', error);
-  }
-  return [];
-}
-
-function saveMatches(data) {
-  try {
-    fs.writeFileSync(MATCHES_PATH, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Error saving matches:', error);
-  }
-}
-
-function saveMatch(matchData) {
-  const matches = loadMatches();
+async function saveMatch(matchData) {
+  const database = await connectDB();
   const match = {
     id: `M${Date.now()}`,
     timestamp: Date.now(),
     date: new Date().toISOString(),
     ...matchData
   };
-  matches.unshift(match); // Add to beginning (newest first)
-  
-  // Keep only last 1000 matches
-  if (matches.length > 1000) {
-    matches.pop();
-  }
-  
-  saveMatches(matches);
+  await database.collection('matches').insertOne(match);
   return match;
 }
 
-function getPlayerMatches(odiscordId, limit = 10) {
-  const matches = loadMatches();
-  return matches
-    .filter(m => 
-      m.winners?.some(p => p.odiscordId === odiscordId) ||
-      m.losers?.some(p => p.odiscordId === odiscordId)
-    )
-    .slice(0, limit);
+async function getPlayerMatches(odiscordId, limit = 10) {
+  const database = await connectDB();
+  return database.collection('matches')
+    .find({
+      $or: [
+        { 'winners.odiscordId': odiscordId },
+        { 'losers.odiscordId': odiscordId }
+      ]
+    })
+    .sort({ timestamp: -1 })
+    .limit(limit)
+    .toArray();
 }
 
-function getRecentMatches(limit = 20) {
-  const matches = loadMatches();
-  return matches.slice(0, limit);
+async function getRecentMatches(limit = 20) {
+  const database = await connectDB();
+  return database.collection('matches')
+    .find({})
+    .sort({ timestamp: -1 })
+    .limit(limit)
+    .toArray();
 }
 
-function clearAllMatches() {
-  saveMatches([]);
+async function clearAllMatches() {
+  const database = await connectDB();
+  await database.collection('matches').deleteMany({});
   console.log('All matches cleared');
 }
 
@@ -222,41 +140,38 @@ function clearAllMatches() {
 // PLAYER MANAGEMENT
 // ===========================================
 
-function getPlayer(odiscordId) {
-  const db = loadDatabase();
+async function getPlayer(odiscordId) {
+  const database = await connectDB();
+  const player = await database.collection('players').findOne({ odiscordId });
   
-  if (!db[odiscordId]) {
-    return null;
-  }
+  if (!player) return null;
   
-  const player = db[odiscordId];
   player.rank = getRank(player.elo);
-  // Calculate KDR
   player.kdr = player.totalDeaths > 0 
     ? (player.totalKills / player.totalDeaths).toFixed(2) 
-    : player.totalKills?.toFixed(2) || '0.00';
+    : (player.totalKills || 0).toFixed(2);
+  
   return player;
 }
 
-function getOrCreatePlayer(odiscordId, username, avatar) {
-  const db = loadDatabase();
+async function getOrCreatePlayer(odiscordId, username, avatar) {
+  const database = await connectDB();
+  let player = await database.collection('players').findOne({ odiscordId });
   
-  if (!db[odiscordId]) {
-    db[odiscordId] = {
-      odiscordId: odiscordId,
+  if (!player) {
+    player = {
+      odiscordId,
       username,
       avatar,
       elo: CONFIG.STARTING_ELO,
       wins: 0,
       losses: 0,
       gamesPlayed: 0,
-      // Lifetime stats
       totalKills: 0,
       totalDeaths: 0,
       totalAssists: 0,
       totalDamage: 0,
       totalHealing: 0,
-      // Class-based stats
       classStats: {
         Tank: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
         Brawler: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
@@ -266,20 +181,31 @@ function getOrCreatePlayer(odiscordId, username, avatar) {
       },
       createdAt: Date.now()
     };
+    await database.collection('players').insertOne(player);
   } else {
-    db[odiscordId].username = username;
-    db[odiscordId].avatar = avatar;
-    // Ensure stats exist for older players
-    if (db[odiscordId].totalKills === undefined) {
-      db[odiscordId].totalKills = 0;
-      db[odiscordId].totalDeaths = 0;
-      db[odiscordId].totalAssists = 0;
-      db[odiscordId].totalDamage = 0;
-      db[odiscordId].totalHealing = 0;
-    }
-    // Ensure class stats exist for older players
-    if (!db[odiscordId].classStats) {
-      db[odiscordId].classStats = {
+    // Update username and avatar
+    await database.collection('players').updateOne(
+      { odiscordId },
+      { $set: { username, avatar } }
+    );
+    player.username = username;
+    player.avatar = avatar;
+    
+    // Ensure classStats exists for older players
+    if (!player.classStats) {
+      await database.collection('players').updateOne(
+        { odiscordId },
+        { $set: { 
+          classStats: {
+            Tank: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+            Brawler: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+            Sniper: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+            Trickster: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
+            Support: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 }
+          }
+        }}
+      );
+      player.classStats = {
         Tank: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
         Brawler: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
         Sniper: { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 },
@@ -289,122 +215,137 @@ function getOrCreatePlayer(odiscordId, username, avatar) {
     }
   }
   
-  saveDatabase(db);
-  const player = db[odiscordId];
   player.rank = getRank(player.elo);
   player.kdr = player.totalDeaths > 0 
     ? (player.totalKills / player.totalDeaths).toFixed(2) 
-    : player.totalKills?.toFixed(2) || '0.00';
+    : (player.totalKills || 0).toFixed(2);
+  
   return player;
 }
 
-function updatePlayer(odiscordId, data) {
-  const db = loadDatabase();
-  db[odiscordId] = { ...db[odiscordId], ...data };
-  saveDatabase(db);
-  return db[odiscordId];
+async function updatePlayer(odiscordId, data) {
+  const database = await connectDB();
+  await database.collection('players').updateOne(
+    { odiscordId },
+    { $set: data }
+  );
 }
 
-function getAllPlayers() {
-  const db = loadDatabase();
-  return Object.values(db).map(p => ({
+async function getAllPlayers() {
+  const database = await connectDB();
+  const players = await database.collection('players').find({}).toArray();
+  return players.map(p => ({
     ...p,
-    rank: getRank(p.elo)
+    rank: getRank(p.elo),
+    kdr: p.totalDeaths > 0 
+      ? (p.totalKills / p.totalDeaths).toFixed(2) 
+      : (p.totalKills || 0).toFixed(2)
   }));
 }
 
 // ===========================================
-// ELO CALCULATIONS
+// ELO CALCULATION (Team Average Based)
 // ===========================================
 
-function calculateExpectedScore(playerElo, opponentElo) {
-  return 1 / (1 + Math.pow(10, (opponentElo - playerElo) / 400));
+function calculateTeamAverageElo(team, getPlayerFunc) {
+  if (team.length === 0) return CONFIG.STARTING_ELO;
+  const totalElo = team.reduce((sum, p) => sum + (p.elo || CONFIG.STARTING_ELO), 0);
+  return totalElo / team.length;
 }
 
-function calculateNewElo(playerElo, opponentElo, won) {
-  const expected = calculateExpectedScore(playerElo, opponentElo);
-  const actual = won ? 1 : 0;
-  return Math.round(playerElo + CONFIG.K_FACTOR * (actual - expected));
-}
-
-function getTeamAverageElo(playerIds) {
-  const db = loadDatabase();
-  let totalElo = 0;
-  let count = 0;
+function calculateEloChange(winnerAvgElo, loserAvgElo) {
+  // Base ELO pool is 50 (winners gain, losers lose)
+  const BASE_ELO = 50;
   
-  for (const odiscordId of playerIds) {
-    if (db[odiscordId]) {
-      totalElo += db[odiscordId].elo;
-      count++;
-    } else {
-      totalElo += CONFIG.STARTING_ELO;
-      count++;
-    }
+  // Calculate expected score based on ELO difference
+  const eloDiff = loserAvgElo - winnerAvgElo;
+  const expectedWinner = 1 / (1 + Math.pow(10, eloDiff / 400));
+  
+  // Calculate ELO change (more for upsets, less for expected wins)
+  // Range: ~20 (heavy favorite wins) to ~30 (underdog wins)
+  const eloChange = Math.round(BASE_ELO * (1 - expectedWinner + 0.5) / 1.5);
+  
+  // Clamp between 20 and 30
+  return Math.max(20, Math.min(30, eloChange));
+}
+
+async function processMatchResult(winnerIds, loserIds, lobbyId) {
+  const database = await connectDB();
+  
+  // Get all players
+  const winners = [];
+  const losers = [];
+  
+  for (const id of winnerIds) {
+    const player = await getPlayer(id);
+    if (player) winners.push(player);
   }
   
-  return count > 0 ? Math.round(totalElo / count) : CONFIG.STARTING_ELO;
-}
-
-// ===========================================
-// PROCESS MATCH RESULT
-// ===========================================
-
-function processMatchResult(winnerIds, loserIds, lobbyId) {
-  const winnerAvgElo = getTeamAverageElo(winnerIds);
-  const loserAvgElo = getTeamAverageElo(loserIds);
+  for (const id of loserIds) {
+    const player = await getPlayer(id);
+    if (player) losers.push(player);
+  }
+  
+  // Calculate team average ELOs
+  const winnerAvgElo = calculateTeamAverageElo(winners);
+  const loserAvgElo = calculateTeamAverageElo(losers);
+  
+  // Calculate ELO change based on team averages
+  const eloChange = calculateEloChange(winnerAvgElo, loserAvgElo);
+  const eloLoss = 50 - eloChange; // Total pool is 50
   
   const results = {
+    lobbyId,
+    winnerAvgElo: Math.round(winnerAvgElo),
+    loserAvgElo: Math.round(loserAvgElo),
+    eloGain: eloChange,
+    eloLoss: eloLoss,
     winners: [],
-    losers: [],
-    lobbyId
+    losers: []
   };
   
-  const db = loadDatabase();
-  
-  for (const odiscordId of winnerIds) {
-    if (!db[odiscordId]) continue;
+  // Update winners
+  for (const player of winners) {
+    const oldElo = player.elo;
+    const newElo = oldElo + eloChange;
     
-    const oldElo = db[odiscordId].elo;
-    const newElo = calculateNewElo(oldElo, loserAvgElo, true);
-    
-    db[odiscordId].elo = newElo;
-    db[odiscordId].wins = (db[odiscordId].wins || 0) + 1;
-    db[odiscordId].gamesPlayed = (db[odiscordId].gamesPlayed || 0) + 1;
+    await updatePlayer(player.odiscordId, {
+      elo: newElo,
+      wins: (player.wins || 0) + 1,
+      gamesPlayed: (player.gamesPlayed || 0) + 1
+    });
     
     results.winners.push({
-      odiscordId,
-      username: db[odiscordId].username,
-      avatar: db[odiscordId].avatar,
+      odiscordId: player.odiscordId,
+      username: player.username,
       oldElo,
       newElo,
-      change: newElo - oldElo
+      change: eloChange
     });
   }
   
-  for (const odiscordId of loserIds) {
-    if (!db[odiscordId]) continue;
+  // Update losers
+  for (const player of losers) {
+    const oldElo = player.elo;
+    const newElo = Math.max(0, oldElo - eloLoss); // Don't go below 0
     
-    const oldElo = db[odiscordId].elo;
-    const newElo = calculateNewElo(oldElo, winnerAvgElo, false);
-    
-    db[odiscordId].elo = newElo;
-    db[odiscordId].losses = (db[odiscordId].losses || 0) + 1;
-    db[odiscordId].gamesPlayed = (db[odiscordId].gamesPlayed || 0) + 1;
+    await updatePlayer(player.odiscordId, {
+      elo: newElo,
+      losses: (player.losses || 0) + 1,
+      gamesPlayed: (player.gamesPlayed || 0) + 1
+    });
     
     results.losers.push({
-      odiscordId,
-      username: db[odiscordId].username,
-      avatar: db[odiscordId].avatar,
+      odiscordId: player.odiscordId,
+      username: player.username,
       oldElo,
       newElo,
-      change: newElo - oldElo
+      change: -eloLoss
     });
   }
   
-  saveDatabase(db);
-  
-  // Save match to history
-  saveMatch(results);
+  // Save match
+  await saveMatch(results);
   
   return results;
 }
@@ -427,29 +368,77 @@ function getRank(elo) {
 // LEADERBOARD
 // ===========================================
 
-function getLeaderboard(limit = 50) {
-  const db = loadDatabase();
-  const players = Object.values(db);
+async function getLeaderboard(limit = 50) {
+  const database = await connectDB();
+  const players = await database.collection('players')
+    .find({ gamesPlayed: { $gt: 0 } })
+    .sort({ elo: -1 })
+    .limit(limit)
+    .toArray();
   
-  return players
-    .filter(p => p.gamesPlayed > 0)
-    .sort((a, b) => b.elo - a.elo)
-    .slice(0, limit)
-    .map(p => ({
-      ...p,
-      rank: getRank(p.elo)
-    }));
+  return players.map(p => ({
+    ...p,
+    rank: getRank(p.elo),
+    kdr: p.totalDeaths > 0 
+      ? (p.totalKills / p.totalDeaths).toFixed(2) 
+      : (p.totalKills || 0).toFixed(2)
+  }));
+}
+
+// ===========================================
+// MIGRATION: Import from JSON files
+// ===========================================
+
+async function migrateFromJSON(playersData, matchesData, linksData) {
+  const database = await connectDB();
+  
+  // Import players
+  if (playersData && Object.keys(playersData).length > 0) {
+    const players = Object.values(playersData);
+    for (const player of players) {
+      await database.collection('players').updateOne(
+        { odiscordId: player.odiscordId },
+        { $set: player },
+        { upsert: true }
+      );
+    }
+    console.log(`Migrated ${players.length} players`);
+  }
+  
+  // Import matches
+  if (matchesData && matchesData.length > 0) {
+    for (const match of matchesData) {
+      await database.collection('matches').updateOne(
+        { id: match.id },
+        { $set: match },
+        { upsert: true }
+      );
+    }
+    console.log(`Migrated ${matchesData.length} matches`);
+  }
+  
+  // Import minecraft links
+  if (linksData && linksData.byDiscord) {
+    for (const [discordId, data] of Object.entries(linksData.byDiscord)) {
+      await database.collection('minecraft_links').updateOne(
+        { odiscordId: discordId },
+        { $set: { odiscordId: discordId, uuid: data.uuid, username: data.username } },
+        { upsert: true }
+      );
+    }
+    console.log(`Migrated minecraft links`);
+  }
 }
 
 module.exports = {
+  connectDB,
+  getLeaderboard,
   getPlayer,
   getOrCreatePlayer,
   updatePlayer,
   getAllPlayers,
   processMatchResult,
   getRank,
-  getLeaderboard,
-  getTeamAverageElo,
   setUserSession,
   getUserSession,
   clearUserSession,
@@ -458,9 +447,9 @@ module.exports = {
   getRecentMatches,
   saveMatch,
   clearAllMatches,
-  // Minecraft linking
   linkMinecraft,
   getMinecraftByDiscord,
   getDiscordByMinecraft,
-  unlinkMinecraft
+  unlinkMinecraft,
+  migrateFromJSON
 };
