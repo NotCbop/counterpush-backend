@@ -959,6 +959,38 @@ app.get('/api/admin/reset', (req, res) => {
   });
 });
 
+// Admin endpoint to get ALL matches
+// Access: /api/admin/matches?key=YOUR_SECRET_KEY
+app.get('/api/admin/matches', (req, res) => {
+  const secretKey = req.query.key;
+  
+  if (secretKey !== 'counterpush-backup-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const matches = db.getRecentMatches(10000); // Get up to 10,000 matches
+  res.json({
+    count: matches.length,
+    matches: matches
+  });
+});
+
+// Admin endpoint to get ALL players
+// Access: /api/admin/players?key=YOUR_SECRET_KEY
+app.get('/api/admin/players', (req, res) => {
+  const secretKey = req.query.key;
+  
+  if (secretKey !== 'counterpush-backup-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const players = db.getAllPlayers();
+  res.json({
+    count: players.length,
+    players: players
+  });
+});
+
 app.get('/api/lobby/:code', (req, res) => {
   const lobby = getLobby(req.params.code);
   if (!lobby) {
@@ -1000,35 +1032,92 @@ async function getMinecraftUUID(username) {
   }
 }
 
-// Fetch player stats from Minecraft server
-async function fetchMinecraftStats(uuid) {
+// Fetch player stats from a specific Minecraft server
+async function fetchMinecraftStats(uuid, serverIndex = null) {
   try {
     // Format UUID with dashes (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
     const formattedUuid = uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
-    const response = await fetch(`${CONFIG.MINECRAFT_STATS_URL}/stats/${formattedUuid}`);
-    if (!response.ok) return null;
-    const data = await response.json();
-    return data;
+    
+    const servers = CONFIG.MINECRAFT_SERVERS || [CONFIG.MINECRAFT_STATS_URL];
+    
+    // If serverIndex specified, only query that server
+    if (serverIndex !== null && servers[serverIndex]) {
+      const serverUrl = servers[serverIndex];
+      const response = await fetch(`${serverUrl}/stats/${formattedUuid}`);
+      if (!response.ok) return null;
+      return response.json();
+    }
+    
+    // Otherwise query all servers and combine
+    const results = await Promise.allSettled(
+      servers.map(async (serverUrl) => {
+        const response = await fetch(`${serverUrl}/stats/${formattedUuid}`);
+        if (!response.ok) return null;
+        return response.json();
+      })
+    );
+    
+    // Combine stats from all servers (sum them up)
+    let combinedStats = { kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0 };
+    let hasAnyStats = false;
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) {
+        hasAnyStats = true;
+        combinedStats.kills += result.value.kills || 0;
+        combinedStats.deaths += result.value.deaths || 0;
+        combinedStats.assists += result.value.assists || 0;
+        combinedStats.damage += result.value.damage || 0;
+        combinedStats.healing += result.value.healing || 0;
+      }
+    }
+    
+    return hasAnyStats ? combinedStats : null;
   } catch (e) {
     console.error('Error fetching Minecraft stats:', e);
     return null;
   }
 }
 
-// Fetch player's current class from Minecraft server
-async function fetchPlayerClass(uuid) {
+// Fetch player's current class from a specific Minecraft server
+async function fetchPlayerClass(uuid, serverIndex = null) {
   try {
     const formattedUuid = uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
-    const response = await fetch(`${CONFIG.MINECRAFT_STATS_URL}/class/${formattedUuid}`);
-    if (!response.ok) return null;
-    const data = await response.json();
-    // Convert class ID to name
     const classNames = { 1: 'Tank', 2: 'Brawler', 3: 'Sniper', 4: 'Trickster', 5: 'Support' };
-    return classNames[data.classId] || null;
+    
+    const servers = CONFIG.MINECRAFT_SERVERS || [CONFIG.MINECRAFT_STATS_URL];
+    
+    // If serverIndex specified, only query that server
+    if (serverIndex !== null && servers[serverIndex]) {
+      const serverUrl = servers[serverIndex];
+      const response = await fetch(`${serverUrl}/class/${formattedUuid}`);
+      if (!response.ok) return null;
+      const data = await response.json();
+      return classNames[data.classId] || null;
+    }
+    
+    // Otherwise query all servers
+    const results = await Promise.allSettled(
+      servers.map(async (serverUrl) => {
+        const response = await fetch(`${serverUrl}/class/${formattedUuid}`);
+        if (!response.ok) return null;
+        return response.json();
+      })
+    );
+    
+    // Return first valid class found (player can only be on one server at a time)
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value && result.value.classId) {
+        return classNames[result.value.classId] || null;
+      }
+    }
+    
+    return null;
   } catch (e) {
     console.error('Error fetching player class:', e);
     return null;
   }
+}
 }
 
 // Link Minecraft account
@@ -1575,7 +1664,7 @@ io.on('connection', (socket) => {
     io.to(lobby.id).emit('lobbyUpdate', lobby);
   });
 
-  socket.on('declareWinner', async ({ lobbyId, winnerTeam }) => {
+  socket.on('declareWinner', async ({ lobbyId, winnerTeam, serverIndex = 0 }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) {
@@ -1597,6 +1686,7 @@ io.on('connection', (socket) => {
 
     lobby.score[winnerTeam] = 2;
     lobby.score[winnerTeam === 'team1' ? 'team2' : 'team1'] = 0;
+    lobby.serverIndex = serverIndex; // Store which server was used
 
     await finishMatch(lobby);
 
@@ -1675,7 +1765,10 @@ io.on('connection', (socket) => {
     const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
     const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
 
-    // Fetch Minecraft stats and class for all players
+    // Get the server index (which server was used for this match)
+    const serverIndex = lobby.serverIndex !== undefined ? lobby.serverIndex : null;
+
+    // Fetch Minecraft stats and class for all players from the specific server
     const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
     const playerStats = {};
     const playerClasses = {};
@@ -1683,8 +1776,8 @@ io.on('connection', (socket) => {
     for (const player of allPlayers) {
       const mcLink = db.getMinecraftByDiscord(player.odiscordId);
       if (mcLink) {
-        const stats = await fetchMinecraftStats(mcLink.uuid);
-        const playerClass = await fetchPlayerClass(mcLink.uuid);
+        const stats = await fetchMinecraftStats(mcLink.uuid, serverIndex);
+        const playerClass = await fetchPlayerClass(mcLink.uuid, serverIndex);
         
         if (stats) {
           playerStats[player.odiscordId] = stats;
