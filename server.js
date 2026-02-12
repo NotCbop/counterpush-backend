@@ -1118,7 +1118,6 @@ async function fetchPlayerClass(uuid, serverIndex = null) {
     return null;
   }
 }
-}
 
 // Link Minecraft account
 app.post('/api/link/minecraft', async (req, res) => {
