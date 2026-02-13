@@ -733,7 +733,7 @@ function generateLobbyCode() {
   return code;
 }
 
-function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
+async function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
   let code;
   do {
     code = generateLobbyCode();
@@ -831,12 +831,12 @@ function getPublicLobbies() {
 // REST API ENDPOINTS
 // ===========================================
 
-app.get('/api/leaderboard', (req, res) => {
+app.get('/api/leaderboard', async (req, res) => {
   const leaderboard = db.getLeaderboard(50);
   res.json(leaderboard);
 });
 
-app.get('/api/players/:id', (req, res) => {
+app.get('/api/players/:id', async (req, res) => {
   const player = db.getPlayer(req.params.id);
   if (!player) {
     return res.status(404).json({ error: 'Player not found' });
@@ -847,13 +847,13 @@ app.get('/api/players/:id', (req, res) => {
   res.json({ ...player, recentMatches: matches });
 });
 
-app.get('/api/players', (req, res) => {
+app.get('/api/players', async (req, res) => {
   const players = db.getAllPlayers();
   res.json(players);
 });
 
 // Player search endpoint for autocomplete
-app.get('/api/players/search/:query', (req, res) => {
+app.get('/api/players/search/:query', async (req, res) => {
   const query = req.params.query.toLowerCase();
   const players = db.getAllPlayers();
   
@@ -872,19 +872,19 @@ app.get('/api/players/search/:query', (req, res) => {
   res.json(matches);
 });
 
-app.get('/api/matches', (req, res) => {
+app.get('/api/matches', async (req, res) => {
   const matches = db.getRecentMatches(20);
   res.json(matches);
 });
 
-app.get('/api/matches/:playerId', (req, res) => {
-  const matches = db.getPlayerMatches(req.params.playerId, 20);
+app.get('/api/matches/:playerId', async (req, res) => {
+  const matches = await db.getPlayerMatches(req.params.playerId, 20);
   res.json(matches);
 });
 
 // Admin backup endpoint - download all data
 // Access: /api/admin/backup?key=YOUR_SECRET_KEY
-app.get('/api/admin/backup', (req, res) => {
+app.get('/api/admin/backup', async (req, res) => {
   const secretKey = req.query.key;
   
   // Simple secret key protection - change this!
@@ -894,8 +894,8 @@ app.get('/api/admin/backup', (req, res) => {
   
   const backup = {
     exportedAt: new Date().toISOString(),
-    players: db.getAllPlayers(),
-    matches: db.getRecentMatches(1000),
+    players: await db.getAllPlayers(),
+    matches: await db.getRecentMatches(1000),
     // Include raw data if needed
   };
   
@@ -904,9 +904,29 @@ app.get('/api/admin/backup', (req, res) => {
   res.json(backup);
 });
 
+// Admin migrate endpoint - import data from JSON
+// POST /api/admin/migrate?key=YOUR_SECRET_KEY
+// Body: { players: {...}, matches: [...], links: {...} }
+app.post('/api/admin/migrate', async (req, res) => {
+  const secretKey = req.query.key;
+  
+  if (secretKey !== 'counterpush-backup-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  try {
+    const { players, matches, links } = req.body;
+    db.migrateFromJSON(players, matches, links);
+    res.json({ success: true, message: 'Migration complete' });
+  } catch (error) {
+    console.error('Migration error:', error);
+    res.status(500).json({ error: 'Migration failed', details: error.message });
+  }
+});
+
 // Admin reset endpoint - reset all ELO and stats
 // Access: /api/admin/reset?key=YOUR_SECRET_KEY&confirm=yes
-app.get('/api/admin/reset', (req, res) => {
+app.get('/api/admin/reset', async (req, res) => {
   const secretKey = req.query.key;
   const confirm = req.query.confirm;
   
@@ -961,7 +981,7 @@ app.get('/api/admin/reset', (req, res) => {
 
 // Admin endpoint to get ALL matches
 // Access: /api/admin/matches?key=YOUR_SECRET_KEY
-app.get('/api/admin/matches', (req, res) => {
+app.get('/api/admin/matches', async (req, res) => {
   const secretKey = req.query.key;
   
   if (secretKey !== 'counterpush-backup-2024') {
@@ -977,7 +997,7 @@ app.get('/api/admin/matches', (req, res) => {
 
 // Admin endpoint to get ALL players
 // Access: /api/admin/players?key=YOUR_SECRET_KEY
-app.get('/api/admin/players', (req, res) => {
+app.get('/api/admin/players', async (req, res) => {
   const secretKey = req.query.key;
   
   if (secretKey !== 'counterpush-backup-2024') {
@@ -1004,7 +1024,7 @@ app.get('/api/lobbies', (req, res) => {
   res.json(publicLobbies);
 });
 
-app.get('/api/session/:odiscordId', (req, res) => {
+app.get('/api/session/:odiscordId', async (req, res) => {
   const session = db.getUserSession(req.params.odiscordId);
   if (session) {
     const lobby = getLobby(session.lobbyId);
@@ -1143,7 +1163,7 @@ app.post('/api/link/minecraft', async (req, res) => {
 });
 
 // Get linked Minecraft account
-app.get('/api/link/minecraft/:discordId', (req, res) => {
+app.get('/api/link/minecraft/:discordId', async (req, res) => {
   const link = db.getMinecraftByDiscord(req.params.discordId);
   if (!link) {
     return res.status(404).json({ error: 'No Minecraft account linked' });
@@ -1152,7 +1172,7 @@ app.get('/api/link/minecraft/:discordId', (req, res) => {
 });
 
 // Unlink Minecraft account
-app.delete('/api/link/minecraft/:discordId', (req, res) => {
+app.delete('/api/link/minecraft/:discordId', async (req, res) => {
   const success = db.unlinkMinecraft(req.params.discordId);
   if (!success) {
     return res.status(404).json({ error: 'No Minecraft account linked' });
@@ -1167,7 +1187,7 @@ app.delete('/api/link/minecraft/:discordId', (req, res) => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('checkSession', ({ odiscordId }) => {
+  socket.on('checkSession', async ({ odiscordId }) => {
     const session = db.getUserSession(odiscordId);
     if (session) {
       const lobby = getLobby(session.lobbyId);
@@ -1914,7 +1934,7 @@ io.on('connection', (socket) => {
     io.emit('lobbiesUpdate', getPublicLobbies());
   });
 
-  socket.on('kickPlayer', ({ lobbyId, odiscordId }) => {
+  socket.on('kickPlayer', async ({ lobbyId, odiscordId }) => {
     const lobby = getLobby(lobbyId);
     
     if (!lobby) return;
