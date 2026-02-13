@@ -1223,7 +1223,7 @@ io.on('connection', (socket) => {
       }
     }
     
-    const lobby = createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
+    const lobby = await createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
     
     // Create lobby VC if public
     if (isPublic) {
