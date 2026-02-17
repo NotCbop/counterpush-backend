@@ -1139,7 +1139,74 @@ async function fetchPlayerClass(uuid, serverIndex = null) {
   }
 }
 
-// Link Minecraft account
+// Store for pending link codes: code -> { discordId, username, expiresAt }
+const pendingLinkCodes = new Map();
+
+// Generate link code
+app.post('/api/link/generate-code', (req, res) => {
+  const { discordId, username } = req.body;
+  
+  if (!discordId) {
+    return res.status(400).json({ error: 'Missing discordId' });
+  }
+  
+  // Remove any existing codes for this user
+  for (const [code, data] of pendingLinkCodes) {
+    if (data.discordId === discordId) {
+      pendingLinkCodes.delete(code);
+    }
+  }
+  
+  // Generate 6-character code
+  const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+  
+  pendingLinkCodes.set(code, { discordId, username, expiresAt });
+  
+  res.json({ code });
+});
+
+// Get pending code for user
+app.get('/api/link/code/:discordId', (req, res) => {
+  for (const [code, data] of pendingLinkCodes) {
+    if (data.discordId === req.params.discordId && data.expiresAt > Date.now()) {
+      return res.json({ code });
+    }
+  }
+  res.json({ code: null });
+});
+
+// Verify link code (called from Minecraft server)
+app.post('/api/link/verify-code', async (req, res) => {
+  const { code, uuid, minecraftUsername } = req.body;
+  
+  if (!code || !uuid || !minecraftUsername) {
+    return res.status(400).json({ error: 'Missing code, uuid, or minecraftUsername' });
+  }
+  
+  const pending = pendingLinkCodes.get(code.toUpperCase());
+  
+  if (!pending) {
+    return res.status(404).json({ error: 'Invalid or expired code' });
+  }
+  
+  if (pending.expiresAt < Date.now()) {
+    pendingLinkCodes.delete(code.toUpperCase());
+    return res.status(404).json({ error: 'Code has expired' });
+  }
+  
+  // Link the accounts
+  db.linkMinecraft(pending.discordId, uuid, minecraftUsername);
+  pendingLinkCodes.delete(code.toUpperCase());
+  
+  res.json({ 
+    success: true, 
+    discordId: pending.discordId,
+    minecraft: { uuid, username: minecraftUsername }
+  });
+});
+
+// Link Minecraft account (direct method - keeping for backwards compatibility)
 app.post('/api/link/minecraft', async (req, res) => {
   const { discordId, minecraftUsername } = req.body;
   
@@ -1178,6 +1245,64 @@ app.delete('/api/link/minecraft/:discordId', async (req, res) => {
     return res.status(404).json({ error: 'No Minecraft account linked' });
   }
   res.json({ success: true });
+});
+
+// Get single match by ID
+app.get('/api/match/:id', (req, res) => {
+  const matches = db.getRecentMatches(10000);
+  const match = matches.find(m => m.id === req.params.id);
+  if (!match) {
+    return res.status(404).json({ error: 'Match not found' });
+  }
+  res.json(match);
+});
+
+// Admin update player
+app.post('/api/admin/update-player', (req, res) => {
+  const secretKey = req.query.key;
+  
+  if (secretKey !== 'counterpush-admin-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const { odiscordId, data } = req.body;
+  
+  if (!odiscordId || !data) {
+    return res.status(400).json({ error: 'Missing odiscordId or data' });
+  }
+  
+  const player = db.getPlayer(odiscordId);
+  if (!player) {
+    return res.status(404).json({ error: 'Player not found' });
+  }
+  
+  db.updatePlayer(odiscordId, data);
+  
+  // Update rank role if ELO changed
+  if (data.elo !== undefined) {
+    const newRank = db.getRank(data.elo);
+    updatePlayerRankRole(odiscordId, newRank);
+  }
+  
+  res.json({ success: true });
+});
+
+// Admin close all lobbies
+app.get('/api/admin/close-lobbies', (req, res) => {
+  const secretKey = req.query.key;
+  
+  if (secretKey !== 'counterpush-admin-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const count = lobbies.size;
+  
+  for (const [code, lobby] of lobbies) {
+    io.to(code).emit('lobbyClosed', { reason: 'Closed by admin' });
+    deleteLobby(code);
+  }
+  
+  res.json({ success: true, message: `Closed ${count} lobbies` });
 });
 
 // ===========================================
