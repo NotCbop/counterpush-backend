@@ -1,8 +1,10 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { createCanvas, loadImage, registerFont } = require('canvas');
 const CONFIG = require('./config');
 const db = require('./database');
 
@@ -666,6 +668,8 @@ async function sendMatchResultToDiscord(lobby, results) {
     }
     
     const winnerTeam = lobby.score.team1 >= 2 ? 'Team 1' : 'Team 2';
+    const winningTeamPlayers = lobby.score.team1 >= 2 ? lobby.teams.team1 : lobby.teams.team2;
+    
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-US', { 
       weekday: 'long', 
@@ -679,10 +683,30 @@ async function sendMatchResultToDiscord(lobby, results) {
       timeZoneName: 'short'
     });
     
+    // Get Minecraft UUIDs and names for winners
+    const winnerUuids = [];
+    const winnerNames = [];
+    
+    for (const player of winningTeamPlayers) {
+      const mcLink = db.getMinecraftByDiscord(player.odiscordId);
+      if (mcLink) {
+        winnerUuids.push(mcLink.uuid);
+        winnerNames.push(mcLink.username);
+      } else {
+        // Use a default/placeholder for unlinked players
+        winnerUuids.push('8667ba71-b85a-4004-af54-457a9734eed7'); // Steve skin
+        winnerNames.push(player.username);
+      }
+    }
+    
+    // Generate winner image URL
+    const imageUrl = `${CONFIG.BACKEND_URL || 'http://localhost:3001'}/api/generate-winner-image?uuids=${winnerUuids.join(',')}&names=${encodeURIComponent(winnerNames.join(','))}&team=${encodeURIComponent(winnerTeam.toUpperCase() + ' WINS!')}`;
+    
     const embed = new EmbedBuilder()
       .setColor(lobby.score.team1 >= 2 ? 0x3B82F6 : 0xEF4444)
       .setTitle(`🏆 Match Complete - ${winnerTeam} Wins!`)
       .setDescription(`**Lobby:** ${lobby.id}\n**Date:** ${dateStr}\n**Time:** ${timeStr}`)
+      .setImage(imageUrl)
       .addFields(
         {
           name: `🔵 Team 1 ${lobby.score.team1 >= 2 ? '(Winner)' : ''}`,
@@ -1138,6 +1162,127 @@ async function fetchPlayerClass(uuid, serverIndex = null) {
     return null;
   }
 }
+
+// ===========================================
+// WINNER IMAGE GENERATION
+// ===========================================
+
+// Helper to fetch image from URL
+async function fetchImageBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const protocol = url.startsWith('https') ? https : http;
+    protocol.get(url, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve(Buffer.concat(chunks)));
+      response.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// Generate winner image
+app.get('/api/generate-winner-image', async (req, res) => {
+  try {
+    const { uuids, names, team } = req.query;
+    
+    if (!uuids || !names) {
+      return res.status(400).json({ error: 'Missing uuids or names' });
+    }
+    
+    const uuidList = uuids.split(',');
+    const nameList = names.split(',');
+    const teamName = team || 'WINNERS';
+    
+    // Canvas settings
+    const headSize = 100;
+    const padding = 30;
+    const spacing = 20;
+    const nameHeight = 30;
+    const topPadding = 80;
+    const bottomPadding = 40;
+    
+    // Calculate dimensions
+    const totalHeads = uuidList.length;
+    const headsPerRow = Math.min(totalHeads, 5);
+    const rows = Math.ceil(totalHeads / 5);
+    
+    const canvasWidth = padding * 2 + headsPerRow * headSize + (headsPerRow - 1) * spacing;
+    const canvasHeight = topPadding + rows * (headSize + nameHeight + spacing) + bottomPadding;
+    
+    // Create canvas
+    const canvas = createCanvas(canvasWidth, canvasHeight);
+    const ctx = canvas.getContext('2d');
+    
+    // Background gradient (dark blue/purple like your example)
+    const gradient = ctx.createLinearGradient(0, 0, canvasWidth, canvasHeight);
+    gradient.addColorStop(0, '#1a1a3e');
+    gradient.addColorStop(1, '#0d0d2b');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    
+    // Top accent line (red)
+    ctx.fillStyle = '#ff3333';
+    ctx.fillRect(0, 0, canvasWidth, 4);
+    
+    // Bottom accent line (blue)
+    ctx.fillStyle = '#3399ff';
+    ctx.fillRect(canvasWidth * 0.6, canvasHeight - 4, canvasWidth * 0.4, 4);
+    
+    // Team name at top
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 32px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(teamName, canvasWidth / 2, 50);
+    
+    // Draw heads and names
+    for (let i = 0; i < uuidList.length; i++) {
+      const uuid = uuidList[i].trim();
+      const name = nameList[i]?.trim() || 'Player';
+      
+      const row = Math.floor(i / 5);
+      const col = i % 5;
+      
+      // Calculate position (center the row if less than 5)
+      const headsInThisRow = Math.min(5, totalHeads - row * 5);
+      const rowWidth = headsInThisRow * headSize + (headsInThisRow - 1) * spacing;
+      const rowStartX = (canvasWidth - rowWidth) / 2;
+      
+      const x = rowStartX + col * (headSize + spacing);
+      const y = topPadding + row * (headSize + nameHeight + spacing);
+      
+      // Fetch and draw head
+      try {
+        const headUrl = `https://mc-heads.net/avatar/${uuid}/100`;
+        const headBuffer = await fetchImageBuffer(headUrl);
+        const headImage = await loadImage(headBuffer);
+        ctx.drawImage(headImage, x, y, headSize, headSize);
+      } catch (e) {
+        // Draw placeholder if head fails to load
+        ctx.fillStyle = '#333';
+        ctx.fillRect(x, y, headSize, headSize);
+        ctx.fillStyle = '#666';
+        ctx.font = 'bold 40px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('?', x + headSize / 2, y + headSize / 2 + 15);
+      }
+      
+      // Draw name under head
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 14px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText(name.substring(0, 12), x + headSize / 2, y + headSize + 20);
+    }
+    
+    // Send image
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    canvas.createPNGStream().pipe(res);
+    
+  } catch (error) {
+    console.error('Error generating winner image:', error);
+    res.status(500).json({ error: 'Failed to generate image' });
+  }
+});
 
 // Store for pending link codes: code -> { discordId, username, expiresAt }
 const pendingLinkCodes = new Map();

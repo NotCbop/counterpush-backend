@@ -67,5 +67,8 @@ module.exports = {
   },
 
   // Frontend URL (for CORS)
-  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000'
+  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+
+  // Backend URL (for generating image URLs)
+  BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3001'
 };
