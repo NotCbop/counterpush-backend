@@ -4,7 +4,7 @@ const https = require('https');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
-const { createCanvas, loadImage, registerFont } = require('canvas');
+const Jimp = require('jimp');
 const CONFIG = require('./config');
 const db = require('./database');
 
@@ -723,11 +723,6 @@ async function sendMatchResultToDiscord(lobby, results) {
             .map(p => `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})`)
             .join('\n') || 'No players',
           inline: true
-        },
-        {
-          name: '📊 Final Score',
-          value: `**${lobby.score.team1}** - **${lobby.score.team2}**`,
-          inline: false
         }
       )
       .setTimestamp()
@@ -1167,20 +1162,7 @@ async function fetchPlayerClass(uuid, serverIndex = null) {
 // WINNER IMAGE GENERATION
 // ===========================================
 
-// Helper to fetch image from URL
-async function fetchImageBuffer(url) {
-  return new Promise((resolve, reject) => {
-    const protocol = url.startsWith('https') ? https : http;
-    protocol.get(url, (response) => {
-      const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => resolve(Buffer.concat(chunks)));
-      response.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-// Generate winner image
+// Generate winner image using Jimp
 app.get('/api/generate-winner-image', async (req, res) => {
   try {
     const { uuids, names, team } = req.query;
@@ -1193,13 +1175,12 @@ app.get('/api/generate-winner-image', async (req, res) => {
     const nameList = names.split(',');
     const teamName = team || 'WINNERS';
     
-    // Canvas settings
+    // Image settings
     const headSize = 100;
-    const padding = 30;
-    const spacing = 20;
-    const nameHeight = 30;
-    const topPadding = 80;
-    const bottomPadding = 40;
+    const padding = 40;
+    const spacing = 25;
+    const topPadding = 20;
+    const bottomPadding = 20;
     
     // Calculate dimensions
     const totalHeads = uuidList.length;
@@ -1207,37 +1188,29 @@ app.get('/api/generate-winner-image', async (req, res) => {
     const rows = Math.ceil(totalHeads / 5);
     
     const canvasWidth = padding * 2 + headsPerRow * headSize + (headsPerRow - 1) * spacing;
-    const canvasHeight = topPadding + rows * (headSize + nameHeight + spacing) + bottomPadding;
+    const canvasHeight = topPadding + rows * (headSize + spacing) + bottomPadding;
     
-    // Create canvas
-    const canvas = createCanvas(canvasWidth, canvasHeight);
-    const ctx = canvas.getContext('2d');
+    // Create base image with dark background
+    const image = new Jimp(canvasWidth, canvasHeight, 0x1a1a3eff);
     
-    // Background gradient (dark blue/purple like your example)
-    const gradient = ctx.createLinearGradient(0, 0, canvasWidth, canvasHeight);
-    gradient.addColorStop(0, '#1a1a3e');
-    gradient.addColorStop(1, '#0d0d2b');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    // Add top accent line (red)
+    for (let x = 0; x < canvasWidth; x++) {
+      for (let y = 0; y < 4; y++) {
+        image.setPixelColor(0xff3333ff, x, y);
+      }
+    }
     
-    // Top accent line (red)
-    ctx.fillStyle = '#ff3333';
-    ctx.fillRect(0, 0, canvasWidth, 4);
+    // Add bottom accent line (blue)
+    const blueStartX = Math.floor(canvasWidth * 0.6);
+    for (let x = blueStartX; x < canvasWidth; x++) {
+      for (let y = canvasHeight - 4; y < canvasHeight; y++) {
+        image.setPixelColor(0x3399ffff, x, y);
+      }
+    }
     
-    // Bottom accent line (blue)
-    ctx.fillStyle = '#3399ff';
-    ctx.fillRect(canvasWidth * 0.6, canvasHeight - 4, canvasWidth * 0.4, 4);
-    
-    // Team name at top
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 32px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(teamName, canvasWidth / 2, 50);
-    
-    // Draw heads and names
+    // Load and place heads
     for (let i = 0; i < uuidList.length; i++) {
       const uuid = uuidList[i].trim();
-      const name = nameList[i]?.trim() || 'Player';
       
       const row = Math.floor(i / 5);
       const col = i % 5;
@@ -1245,38 +1218,32 @@ app.get('/api/generate-winner-image', async (req, res) => {
       // Calculate position (center the row if less than 5)
       const headsInThisRow = Math.min(5, totalHeads - row * 5);
       const rowWidth = headsInThisRow * headSize + (headsInThisRow - 1) * spacing;
-      const rowStartX = (canvasWidth - rowWidth) / 2;
+      const rowStartX = Math.floor((canvasWidth - rowWidth) / 2);
       
       const x = rowStartX + col * (headSize + spacing);
-      const y = topPadding + row * (headSize + nameHeight + spacing);
+      const y = topPadding + row * (headSize + spacing);
       
-      // Fetch and draw head
+      // Fetch and place head
       try {
-        const headUrl = `https://mc-heads.net/avatar/${uuid}/100`;
-        const headBuffer = await fetchImageBuffer(headUrl);
-        const headImage = await loadImage(headBuffer);
-        ctx.drawImage(headImage, x, y, headSize, headSize);
+        const headUrl = `https://mc-heads.net/avatar/${uuid}/${headSize}`;
+        const headImage = await Jimp.read(headUrl);
+        headImage.resize(headSize, headSize);
+        image.composite(headImage, x, y);
       } catch (e) {
-        // Draw placeholder if head fails to load
-        ctx.fillStyle = '#333';
-        ctx.fillRect(x, y, headSize, headSize);
-        ctx.fillStyle = '#666';
-        ctx.font = 'bold 40px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('?', x + headSize / 2, y + headSize / 2 + 15);
+        // Draw gray placeholder if head fails to load
+        for (let px = x; px < x + headSize; px++) {
+          for (let py = y; py < y + headSize; py++) {
+            image.setPixelColor(0x333333ff, px, py);
+          }
+        }
       }
-      
-      // Draw name under head
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 14px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText(name.substring(0, 12), x + headSize / 2, y + headSize + 20);
     }
     
-    // Send image
+    // Convert to buffer and send
+    const buffer = await image.getBufferAsync(Jimp.MIME_PNG);
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    canvas.createPNGStream().pipe(res);
+    res.send(buffer);
     
   } catch (error) {
     console.error('Error generating winner image:', error);
