@@ -217,6 +217,13 @@ function getPlayer(odiscordId) {
     ? (player.totalKills / player.totalDeaths).toFixed(2) 
     : (player.totalKills || 0).toFixed(2);
   
+  // Add Minecraft info
+  const mcLink = getMinecraftByDiscord(odiscordId);
+  if (mcLink) {
+    player.minecraftUuid = mcLink.uuid;
+    player.minecraftUsername = mcLink.username;
+  }
+  
   return player;
 }
 
@@ -284,13 +291,20 @@ function updatePlayer(odiscordId, data) {
 
 function getAllPlayers() {
   const db = loadDatabase();
-  return Object.values(db).map(p => ({
-    ...p,
-    rank: getRank(p.elo),
-    kdr: p.totalDeaths > 0 
-      ? (p.totalKills / p.totalDeaths).toFixed(2) 
-      : (p.totalKills || 0).toFixed(2)
-  }));
+  const links = loadLinks();
+  
+  return Object.values(db).map(p => {
+    const mcLink = links.byDiscord[p.odiscordId];
+    return {
+      ...p,
+      rank: getRank(p.elo),
+      kdr: p.totalDeaths > 0 
+        ? (p.totalKills / p.totalDeaths).toFixed(2) 
+        : (p.totalKills || 0).toFixed(2),
+      minecraftUuid: mcLink?.uuid || null,
+      minecraftUsername: mcLink?.username || null
+    };
+  });
 }
 
 // ===========================================
