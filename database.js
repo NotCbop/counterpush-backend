@@ -398,8 +398,7 @@ function processMatchResult(winnerIds, loserIds, lobbyId) {
     });
   }
   
-  // Save match
-  saveMatch(results);
+  // NOTE: Don't save match here - caller will add stats and save
   
   return results;
 }

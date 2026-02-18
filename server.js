@@ -2103,6 +2103,9 @@ io.on('connection', (socket) => {
       player.class = playerClasses[player.odiscordId] || null;
     }
     
+    // NOW save the match with stats included
+    db.saveMatch(results);
+    
     lobby.eloResults = results;
 
     // Update rank roles
