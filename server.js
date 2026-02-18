@@ -833,13 +833,15 @@ async function moveAllPlayersToMainVC(lobby) {
 function getPublicLobbies() {
   const publicLobbies = [];
   for (const [code, lobby] of lobbies) {
-    if (lobby.isPublic && lobby.phase === 'waiting') {
+    if (lobby.isPublic) {
       publicLobbies.push({
         id: lobby.id,
         host: { username: lobby.host.username, avatar: lobby.host.avatar },
         playerCount: lobby.players.length,
         maxPlayers: lobby.maxPlayers,
-        createdAt: lobby.createdAt
+        createdAt: lobby.createdAt,
+        phase: lobby.phase,
+        score: lobby.score || null
       });
     }
   }
@@ -1180,6 +1182,7 @@ app.get('/api/generate-winner-image', async (req, res) => {
     const padding = 40;
     const spacing = 25;
     const topPadding = 20;
+    const nameHeight = 25;
     const bottomPadding = 20;
     
     // Calculate dimensions
@@ -1188,29 +1191,32 @@ app.get('/api/generate-winner-image', async (req, res) => {
     const rows = Math.ceil(totalHeads / 5);
     
     const canvasWidth = padding * 2 + headsPerRow * headSize + (headsPerRow - 1) * spacing;
-    const canvasHeight = topPadding + rows * (headSize + spacing) + bottomPadding;
+    const canvasHeight = topPadding + rows * (headSize + nameHeight + spacing) + bottomPadding;
     
     // Create base image with dark background
     const image = new Jimp(canvasWidth, canvasHeight, 0x1a1a3eff);
     
-    // Add top accent line (red)
+    // Load font for names
+    const font = await Jimp.loadFont(Jimp.FONT_SANS_14_WHITE);
+    
+    // Add top accent line (green - #9ced23)
     for (let x = 0; x < canvasWidth; x++) {
       for (let y = 0; y < 4; y++) {
-        image.setPixelColor(0xff3333ff, x, y);
+        image.setPixelColor(0x9ced23ff, x, y);
       }
     }
     
-    // Add bottom accent line (blue)
-    const blueStartX = Math.floor(canvasWidth * 0.6);
-    for (let x = blueStartX; x < canvasWidth; x++) {
+    // Add bottom accent line (blue - #0d52ad)
+    for (let x = 0; x < canvasWidth; x++) {
       for (let y = canvasHeight - 4; y < canvasHeight; y++) {
-        image.setPixelColor(0x3399ffff, x, y);
+        image.setPixelColor(0x0d52adff, x, y);
       }
     }
     
-    // Load and place heads
+    // Load and place heads with names
     for (let i = 0; i < uuidList.length; i++) {
       const uuid = uuidList[i].trim();
+      const name = nameList[i]?.trim() || 'Player';
       
       const row = Math.floor(i / 5);
       const col = i % 5;
@@ -1221,7 +1227,7 @@ app.get('/api/generate-winner-image', async (req, res) => {
       const rowStartX = Math.floor((canvasWidth - rowWidth) / 2);
       
       const x = rowStartX + col * (headSize + spacing);
-      const y = topPadding + row * (headSize + spacing);
+      const y = topPadding + row * (headSize + nameHeight + spacing);
       
       // Fetch and place head
       try {
@@ -1237,6 +1243,13 @@ app.get('/api/generate-winner-image', async (req, res) => {
           }
         }
       }
+      
+      // Add name under head (centered)
+      const truncatedName = name.length > 12 ? name.substring(0, 12) : name;
+      const textWidth = Jimp.measureText(font, truncatedName);
+      const textX = x + Math.floor((headSize - textWidth) / 2);
+      const textY = y + headSize + 5;
+      image.print(font, textX, textY, truncatedName);
     }
     
     // Convert to buffer and send
