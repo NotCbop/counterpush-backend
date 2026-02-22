@@ -669,6 +669,13 @@ async function sendMatchResultToDiscord(lobby, results) {
     
     const winnerTeam = lobby.score.team1 >= 2 ? 'Team 1' : 'Team 2';
     const winningTeamPlayers = lobby.score.team1 >= 2 ? lobby.teams.team1 : lobby.teams.team2;
+    const winnerColor = lobby.score.team1 >= 2 ? (lobby.team1Color || 1) : (lobby.team2Color || 5);
+    
+    // Get color info
+    const team1ColorInfo = CONFIG.TEAM_COLORS[lobby.team1Color || 1] || CONFIG.TEAM_COLORS[1];
+    const team2ColorInfo = CONFIG.TEAM_COLORS[lobby.team2Color || 5] || CONFIG.TEAM_COLORS[5];
+    const winnerColorInfo = lobby.score.team1 >= 2 ? team1ColorInfo : team2ColorInfo;
+    const embedColor = parseInt(winnerColorInfo.hex.replace('#', ''), 16);
     
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-US', { 
@@ -683,56 +690,77 @@ async function sendMatchResultToDiscord(lobby, results) {
       timeZoneName: 'short'
     });
     
-    // Get Minecraft UUIDs and names for winners
+    // Get Minecraft UUIDs for winners
     const winnerUuids = [];
-    const winnerNames = [];
     
     for (const player of winningTeamPlayers) {
       const mcLink = db.getMinecraftByDiscord(player.odiscordId);
       if (mcLink) {
         winnerUuids.push(mcLink.uuid);
-        winnerNames.push(mcLink.username);
       } else {
         // Use a default/placeholder for unlinked players
         winnerUuids.push('8667ba71-b85a-4004-af54-457a9734eed7'); // Steve skin
-        winnerNames.push(player.username);
       }
     }
     
-    // Generate winner image URL
-    const imageUrl = `${CONFIG.BACKEND_URL || 'http://localhost:3001'}/api/generate-winner-image?uuids=${winnerUuids.join(',')}&names=${encodeURIComponent(winnerNames.join(','))}&team=${encodeURIComponent(winnerTeam.toUpperCase() + ' WINS!')}`;
+    // Generate winner image URL with team color
+    const imageUrl = `${CONFIG.BACKEND_URL || 'http://localhost:3001'}/api/generate-winner-image?uuids=${winnerUuids.join(',')}&color=${winnerColor}`;
+    
+    // Get color emojis
+    const team1Emoji = getColorEmoji(lobby.team1Color || 1);
+    const team2Emoji = getColorEmoji(lobby.team2Color || 5);
     
     const embed = new EmbedBuilder()
-      .setColor(lobby.score.team1 >= 2 ? 0x3B82F6 : 0xEF4444)
+      .setColor(embedColor)
       .setTitle(`🏆 Match Complete - ${winnerTeam} Wins!`)
-      .setDescription(`**Lobby:** ${lobby.id}\n**Date:** ${dateStr}\n**Time:** ${timeStr}`)
+      .setDescription(`**Lobby:** ${lobby.id}\n**Date:** ${dateStr}\n**Time:** ${timeStr}${!lobby.isRanked ? '\n⚠️ *Unranked Match*' : ''}`)
       .setImage(imageUrl)
       .addFields(
         {
-          name: `🔵 Team 1 ${lobby.score.team1 >= 2 ? '(Winner)' : ''}`,
+          name: `${team1Emoji} Team 1 ${lobby.score.team1 >= 2 ? '(Winner)' : ''}`,
           value: results.winners.filter(p => lobby.teams.team1.some(t => t.odiscordId === p.odiscordId))
             .concat(results.losers.filter(p => lobby.teams.team1.some(t => t.odiscordId === p.odiscordId)))
-            .map(p => `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})`)
+            .map(p => lobby.isRanked ? `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})` : p.username)
             .join('\n') || 'No players',
           inline: true
         },
         {
-          name: `🔴 Team 2 ${lobby.score.team2 >= 2 ? '(Winner)' : ''}`,
+          name: `${team2Emoji} Team 2 ${lobby.score.team2 >= 2 ? '(Winner)' : ''}`,
           value: results.winners.filter(p => lobby.teams.team2.some(t => t.odiscordId === p.odiscordId))
             .concat(results.losers.filter(p => lobby.teams.team2.some(t => t.odiscordId === p.odiscordId)))
-            .map(p => `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})`)
+            .map(p => lobby.isRanked ? `${p.username}: ${p.oldElo} → ${p.newElo} (${p.change >= 0 ? '+' : ''}${p.change})` : p.username)
             .join('\n') || 'No players',
           inline: true
+        },
+        {
+          name: '📊 Final Score',
+          value: `**${lobby.score.team1}** - **${lobby.score.team2}**`,
+          inline: false
         }
       )
       .setTimestamp()
-      .setFooter({ text: 'Counterpush Ranked' });
+      .setFooter({ text: lobby.isRanked ? 'Counterpush Ranked' : 'Counterpush Casual' });
     
     await channel.send({ embeds: [embed] });
     console.log('Match result sent to Discord');
   } catch (e) {
     console.error('Error sending match result to Discord:', e);
   }
+}
+
+// Get emoji for team color
+function getColorEmoji(colorId) {
+  const emojis = {
+    0: '⚪', // white
+    1: '🔵', // blue
+    2: '🟣', // purple
+    3: '🟢', // green
+    4: '🟡', // yellow
+    5: '🔴', // red
+    6: '🩷', // pink
+    7: '🟠'  // orange
+  };
+  return emojis[colorId] || '⚪';
 }
 
 // ===========================================
@@ -742,6 +770,7 @@ async function sendMatchResultToDiscord(lobby, results) {
 const lobbies = new Map();
 const purgeImmunity = new Set(); // Players who were purged and are immune next time
 const dailyImmunity = new Map(); // Discord ID -> timestamp when immunity expires (5 hour cooldown)
+const globalTimeouts = new Map(); // Discord ID -> { until: timestamp, reason: string, bannedBy: discordId }
 
 function generateLobbyCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -752,7 +781,25 @@ function generateLobbyCode() {
   return code;
 }
 
-async function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
+// Check if user has the public host role
+async function userCanHostPublic(discordId) {
+  if (!discordClient.isReady()) return false;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return false;
+    
+    const member = await guild.members.fetch(discordId).catch(() => null);
+    if (!member) return false;
+    
+    return member.roles.cache.has(CONFIG.PUBLIC_HOST_ROLE_ID);
+  } catch (e) {
+    console.error('Error checking host role:', e);
+    return false;
+  }
+}
+
+async function createLobby(hostId, hostData, maxPlayers, isPublic = false, isRanked = true) {
   let code;
   do {
     code = generateLobbyCode();
@@ -772,16 +819,20 @@ async function createLobby(hostId, hostData, maxPlayers, isPublic = false) {
     picksLeft: 0,
     score: { team1: 0, team2: 0 },
     isPublic,
+    isRanked, // Only public lobbies with role can be ranked
     lobbyVCId: null,
     team1VCId: null,
     team2VCId: null,
+    whitelist: [hostId], // Host is always whitelisted
+    team1Color: 1, // Default blue
+    team2Color: 5, // Default red
     createdAt: Date.now()
   };
 
   lobbies.set(code, lobby);
   db.setUserSession(hostId, code);
   
-  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic})`);
+  console.log(`Lobby ${code} created by ${hostData.username} (public: ${isPublic}, ranked: ${isRanked})`);
   return lobby;
 }
 
@@ -841,7 +892,10 @@ function getPublicLobbies() {
         maxPlayers: lobby.maxPlayers,
         createdAt: lobby.createdAt,
         phase: lobby.phase,
-        score: lobby.score || null
+        score: lobby.score || null,
+        isRanked: lobby.isRanked || false,
+        team1Color: lobby.team1Color || 1,
+        team2Color: lobby.team2Color || 5
       });
     }
   }
@@ -1076,8 +1130,9 @@ async function getMinecraftUUID(username) {
 // Fetch player stats from a specific Minecraft server
 async function fetchMinecraftStats(uuid, serverIndex = null) {
   try {
-    // Format UUID with dashes (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-    const formattedUuid = uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    // First remove any existing dashes, then format properly
+    const cleanUuid = uuid.replace(/-/g, '');
+    const formattedUuid = cleanUuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
     
     const servers = CONFIG.MINECRAFT_SERVERS || [CONFIG.MINECRAFT_STATS_URL];
     
@@ -1123,7 +1178,9 @@ async function fetchMinecraftStats(uuid, serverIndex = null) {
 // Fetch player's current class from a specific Minecraft server
 async function fetchPlayerClass(uuid, serverIndex = null) {
   try {
-    const formattedUuid = uuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    // First remove any existing dashes, then format properly
+    const cleanUuid = uuid.replace(/-/g, '');
+    const formattedUuid = cleanUuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
     const classNames = { 1: 'Tank', 2: 'Brawler', 3: 'Sniper', 4: 'Trickster', 5: 'Support' };
     
     const servers = CONFIG.MINECRAFT_SERVERS || [CONFIG.MINECRAFT_STATS_URL];
@@ -1160,29 +1217,110 @@ async function fetchPlayerClass(uuid, serverIndex = null) {
   }
 }
 
+// Fetch player's recent match result from Minecraft
+// Returns: 1 = win, -1 = loss, 0 = draw, 2 = no contest
+async function fetchPlayerMatchResult(uuid, serverIndex = null) {
+  try {
+    const cleanUuid = uuid.replace(/-/g, '');
+    const formattedUuid = cleanUuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    
+    const servers = CONFIG.MINECRAFT_SERVERS || [CONFIG.MINECRAFT_STATS_URL];
+    
+    if (serverIndex !== null && servers[serverIndex]) {
+      const serverUrl = servers[serverIndex];
+      const response = await fetch(`${serverUrl}/recentwin/${formattedUuid}`);
+      if (!response.ok) return null;
+      const data = await response.json();
+      return data.result !== undefined ? data.result : null;
+    }
+    
+    // Query all servers
+    const results = await Promise.allSettled(
+      servers.map(async (serverUrl) => {
+        const response = await fetch(`${serverUrl}/recentwin/${formattedUuid}`);
+        if (!response.ok) return null;
+        return response.json();
+      })
+    );
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value && result.value.result !== undefined) {
+        return result.value.result;
+      }
+    }
+    
+    return null;
+  } catch (e) {
+    console.error('Error fetching match result:', e);
+    return null;
+  }
+}
+
+// Fetch player's team color from Minecraft
+// Returns: 0-7 for colors (white, blue, purple, green, yellow, red, pink, orange)
+async function fetchPlayerTeamColor(uuid, serverIndex = null) {
+  try {
+    const cleanUuid = uuid.replace(/-/g, '');
+    const formattedUuid = cleanUuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+    
+    const servers = CONFIG.MINECRAFT_SERVERS || [CONFIG.MINECRAFT_STATS_URL];
+    
+    if (serverIndex !== null && servers[serverIndex]) {
+      const serverUrl = servers[serverIndex];
+      const response = await fetch(`${serverUrl}/color/${formattedUuid}`);
+      if (!response.ok) return null;
+      const data = await response.json();
+      return data.color !== undefined ? data.color : null;
+    }
+    
+    // Query all servers
+    const results = await Promise.allSettled(
+      servers.map(async (serverUrl) => {
+        const response = await fetch(`${serverUrl}/color/${formattedUuid}`);
+        if (!response.ok) return null;
+        return response.json();
+      })
+    );
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value && result.value.color !== undefined) {
+        return result.value.color;
+      }
+    }
+    
+    return null;
+  } catch (e) {
+    console.error('Error fetching team color:', e);
+    return null;
+  }
+}
+
 // ===========================================
 // WINNER IMAGE GENERATION
 // ===========================================
 
-// Generate winner image using Jimp
+// Generate winner image using Jimp (heads only, no text)
 app.get('/api/generate-winner-image', async (req, res) => {
   try {
-    const { uuids, names, team } = req.query;
+    const { uuids, names, team, color } = req.query;
     
-    if (!uuids || !names) {
-      return res.status(400).json({ error: 'Missing uuids or names' });
+    if (!uuids) {
+      return res.status(400).json({ error: 'Missing uuids' });
     }
     
-    const uuidList = uuids.split(',');
-    const nameList = names.split(',');
-    const teamName = team || 'WINNERS';
+    const uuidList = uuids.split(',').filter(u => u.trim());
+    const teamColor = parseInt(color) || 1; // Default blue
+    
+    // Get color from config
+    const colorInfo = CONFIG.TEAM_COLORS[teamColor] || CONFIG.TEAM_COLORS[1];
+    const hexColor = colorInfo.hex.replace('#', '');
+    const colorInt = parseInt(hexColor, 16);
     
     // Image settings
     const headSize = 100;
     const padding = 40;
     const spacing = 25;
     const topPadding = 20;
-    const nameHeight = 25;
     const bottomPadding = 20;
     
     // Calculate dimensions
@@ -1191,32 +1329,31 @@ app.get('/api/generate-winner-image', async (req, res) => {
     const rows = Math.ceil(totalHeads / 5);
     
     const canvasWidth = padding * 2 + headsPerRow * headSize + (headsPerRow - 1) * spacing;
-    const canvasHeight = topPadding + rows * (headSize + nameHeight + spacing) + bottomPadding;
+    const canvasHeight = topPadding + rows * (headSize + spacing) + bottomPadding;
     
     // Create base image with dark background
     const image = new Jimp(canvasWidth, canvasHeight, 0x1a1a3eff);
     
-    // Load font for names
-    const font = await Jimp.loadFont(Jimp.FONT_SANS_14_WHITE);
-    
-    // Add top accent line (green - #9ced23)
+    // Add top accent line (team color)
+    const topColor = (colorInt << 8) | 0xff; // Add alpha
     for (let x = 0; x < canvasWidth; x++) {
       for (let y = 0; y < 4; y++) {
-        image.setPixelColor(0x9ced23ff, x, y);
+        image.setPixelColor(topColor, x, y);
       }
     }
     
-    // Add bottom accent line (blue - #0d52ad)
+    // Add bottom accent line (same team color)
     for (let x = 0; x < canvasWidth; x++) {
       for (let y = canvasHeight - 4; y < canvasHeight; y++) {
-        image.setPixelColor(0x0d52adff, x, y);
+        image.setPixelColor(topColor, x, y);
       }
     }
     
-    // Load and place heads with names
+    // Load and place heads
     for (let i = 0; i < uuidList.length; i++) {
       const uuid = uuidList[i].trim();
-      const name = nameList[i]?.trim() || 'Player';
+      // Clean UUID format
+      const cleanUuid = uuid.replace(/-/g, '');
       
       const row = Math.floor(i / 5);
       const col = i % 5;
@@ -1227,15 +1364,16 @@ app.get('/api/generate-winner-image', async (req, res) => {
       const rowStartX = Math.floor((canvasWidth - rowWidth) / 2);
       
       const x = rowStartX + col * (headSize + spacing);
-      const y = topPadding + row * (headSize + nameHeight + spacing);
+      const y = topPadding + row * (headSize + spacing);
       
       // Fetch and place head
       try {
-        const headUrl = `https://mc-heads.net/avatar/${uuid}/${headSize}`;
+        const headUrl = `https://mc-heads.net/avatar/${cleanUuid}/${headSize}`;
         const headImage = await Jimp.read(headUrl);
         headImage.resize(headSize, headSize);
         image.composite(headImage, x, y);
       } catch (e) {
+        console.error(`Failed to load head for ${cleanUuid}:`, e.message);
         // Draw gray placeholder if head fails to load
         for (let px = x; px < x + headSize; px++) {
           for (let py = y; py < y + headSize; py++) {
@@ -1243,19 +1381,12 @@ app.get('/api/generate-winner-image', async (req, res) => {
           }
         }
       }
-      
-      // Add name under head (centered)
-      const truncatedName = name.length > 12 ? name.substring(0, 12) : name;
-      const textWidth = Jimp.measureText(font, truncatedName);
-      const textX = x + Math.floor((headSize - textWidth) / 2);
-      const textY = y + headSize + 5;
-      image.print(font, textX, textY, truncatedName);
     }
     
     // Convert to buffer and send
     const buffer = await image.getBufferAsync(Jimp.MIME_PNG);
     res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('Cache-Control', 'public, max-age=60');
     res.send(buffer);
     
   } catch (error) {
@@ -1320,14 +1451,18 @@ app.post('/api/link/verify-code', async (req, res) => {
     return res.status(404).json({ error: 'Code has expired' });
   }
   
+  // Normalize UUID - remove dashes and re-add them properly
+  const cleanUuid = uuid.replace(/-/g, '');
+  const normalizedUuid = cleanUuid.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+  
   // Link the accounts
-  db.linkMinecraft(pending.discordId, uuid, minecraftUsername);
+  db.linkMinecraft(pending.discordId, normalizedUuid, minecraftUsername);
   pendingLinkCodes.delete(code.toUpperCase());
   
   res.json({ 
     success: true, 
     discordId: pending.discordId,
-    minecraft: { uuid, username: minecraftUsername }
+    minecraft: { uuid: normalizedUuid, username: minecraftUsername }
   });
 });
 
@@ -1455,6 +1590,16 @@ io.on('connection', (socket) => {
   socket.on('createLobby', async ({ userData, maxPlayers, isPublic }) => {
     console.log('createLobby called:', { userData: userData.username, maxPlayers, isPublic });
     
+    // Check if player has a global timeout
+    const timeout = globalTimeouts.get(userData.odiscordId);
+    if (timeout && timeout.until > Date.now()) {
+      const remainingMins = Math.ceil((timeout.until - Date.now()) / 60000);
+      socket.emit('error', { message: `You are timed out for ${remainingMins} more minute(s). Reason: ${timeout.reason || 'No reason given'}` });
+      return;
+    } else if (timeout) {
+      globalTimeouts.delete(userData.odiscordId);
+    }
+    
     // Check if user is already hosting a lobby
     for (const [code, existingLobby] of lobbies) {
       if (existingLobby.host.odiscordId === userData.odiscordId) {
@@ -1473,7 +1618,23 @@ io.on('connection', (socket) => {
       }
     }
     
-    const lobby = await createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic || false);
+    // Check if user can host public lobbies
+    let canHostPublic = false;
+    let isRanked = false;
+    
+    if (isPublic) {
+      canHostPublic = await userCanHostPublic(userData.odiscordId);
+      if (!canHostPublic) {
+        // They can't host public, so make it private unranked
+        socket.emit('error', { message: 'You need the host role to create public ranked lobbies. Creating private unranked lobby instead.' });
+        isPublic = false;
+        isRanked = false;
+      } else {
+        isRanked = true;
+      }
+    }
+    
+    const lobby = await createLobby(userData.odiscordId, userData, maxPlayers || CONFIG.MAX_PLAYERS, isPublic, isRanked);
     
     // Create lobby VC if public
     if (isPublic) {
@@ -1503,6 +1664,17 @@ io.on('connection', (socket) => {
     if (!lobby) {
       socket.emit('error', { message: 'Lobby not found' });
       return;
+    }
+
+    // Check if player has a global timeout
+    const timeout = globalTimeouts.get(userData.odiscordId);
+    if (timeout && timeout.until > Date.now()) {
+      const remainingMins = Math.ceil((timeout.until - Date.now()) / 60000);
+      socket.emit('error', { message: `You are timed out for ${remainingMins} more minute(s). Reason: ${timeout.reason || 'No reason given'}` });
+      return;
+    } else if (timeout) {
+      // Timeout expired, remove it
+      globalTimeouts.delete(userData.odiscordId);
     }
 
     // Check if player is already in this lobby (allow rejoin even if full or in progress)
@@ -1633,8 +1805,9 @@ io.on('connection', (socket) => {
       return !immuneUntil || immuneUntil < now;
     });
     
-    // Don't eliminate the host OR players with purge immunity OR players with daily immunity
+    // Don't eliminate the host OR players with purge immunity OR players with daily immunity OR whitelisted players
     const immunePlayers = lobby.players.filter(p => purgeImmunity.has(p.odiscordId));
+    const whitelistedPlayers = lobby.players.filter(p => lobby.whitelist && lobby.whitelist.includes(p.odiscordId));
     const allImmunePlayers = lobby.players.filter(p => 
       purgeImmunity.has(p.odiscordId) || dailyImmunePlayers.includes(p)
     );
@@ -1642,7 +1815,8 @@ io.on('connection', (socket) => {
     const eliminatablePlayers = lobby.players.filter(p => 
       p.odiscordId !== lobby.host.odiscordId && 
       !purgeImmunity.has(p.odiscordId) &&
-      !dailyImmunePlayers.includes(p)
+      !dailyImmunePlayers.includes(p) &&
+      !(lobby.whitelist && lobby.whitelist.includes(p.odiscordId))
     );
     
     // Clear purge immunity for players who used it
@@ -1664,6 +1838,9 @@ io.on('connection', (socket) => {
     });
     dailyImmunePlayers.filter(p => !immunePlayers.some(ip => ip.odiscordId === p.odiscordId)).forEach(p => {
       immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'daily' });
+    });
+    whitelistedPlayers.filter(p => !immuneNotifications.some(n => n.odiscordId === p.odiscordId)).forEach(p => {
+      immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'whitelist' });
     });
     
     if (immuneNotifications.length > 0) {
@@ -2030,29 +2207,56 @@ io.on('connection', (socket) => {
   async function finishMatch(lobby) {
     lobby.phase = 'finished';
 
-    const winnerTeam = lobby.score.team1 >= 2 ? 'team1' : 'team2';
-    const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
-    const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
-
     // Get the server index (which server was used for this match)
     const serverIndex = lobby.serverIndex !== undefined ? lobby.serverIndex : null;
 
-    // Fetch Minecraft stats and class for all players from the specific server
+    // Fetch Minecraft stats, class, team color, and match result for all players
     const allPlayers = [...lobby.teams.team1, ...lobby.teams.team2];
     const playerStats = {};
     const playerClasses = {};
+    const playerResults = {};
+    const playerColors = {};
     
     for (const player of allPlayers) {
       const mcLink = db.getMinecraftByDiscord(player.odiscordId);
       if (mcLink) {
         const stats = await fetchMinecraftStats(mcLink.uuid, serverIndex);
         const playerClass = await fetchPlayerClass(mcLink.uuid, serverIndex);
+        const matchResult = await fetchPlayerMatchResult(mcLink.uuid, serverIndex);
+        const teamColor = await fetchPlayerTeamColor(mcLink.uuid, serverIndex);
         
         if (stats) {
           playerStats[player.odiscordId] = stats;
-          playerClasses[player.odiscordId] = playerClass || 'Unknown';
-          
-          // Update lifetime stats
+        }
+        playerClasses[player.odiscordId] = playerClass || 'Unknown';
+        playerResults[player.odiscordId] = matchResult;
+        playerColors[player.odiscordId] = teamColor;
+      }
+    }
+    
+    // Try to auto-detect team colors from Minecraft
+    const team1Colors = lobby.teams.team1.map(p => playerColors[p.odiscordId]).filter(c => c !== null && c !== undefined);
+    const team2Colors = lobby.teams.team2.map(p => playerColors[p.odiscordId]).filter(c => c !== null && c !== undefined);
+    
+    if (team1Colors.length > 0) {
+      lobby.team1Color = team1Colors[0]; // Use first player's color
+    }
+    if (team2Colors.length > 0) {
+      lobby.team2Color = team2Colors[0];
+    }
+    
+    // Determine winner based on score (already tracked) or use Minecraft result as fallback
+    const winnerTeam = lobby.score.team1 >= 2 ? 'team1' : 'team2';
+    const winnerIds = lobby.teams[winnerTeam].map(p => p.odiscordId);
+    const loserIds = lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => p.odiscordId);
+
+    // Update lifetime stats for all players (only if ranked)
+    if (lobby.isRanked) {
+      for (const player of allPlayers) {
+        const stats = playerStats[player.odiscordId];
+        const playerClass = playerClasses[player.odiscordId];
+        
+        if (stats) {
           const currentPlayer = db.getPlayer(player.odiscordId);
           if (currentPlayer) {
             const updateData = {
@@ -2064,7 +2268,7 @@ io.on('connection', (socket) => {
             };
             
             // Update class-specific stats
-            if (playerClass && currentPlayer.classStats) {
+            if (playerClass && playerClass !== 'Unknown' && currentPlayer.classStats) {
               const classStats = currentPlayer.classStats[playerClass] || { 
                 kills: 0, deaths: 0, assists: 0, damage: 0, healing: 0, gamesPlayed: 0, wins: 0 
               };
@@ -2090,8 +2294,31 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Calculate ELO (not affected by stats)
-    const results = db.processMatchResult(winnerIds, loserIds, lobby.id);
+    // Calculate ELO only if ranked
+    let results;
+    if (lobby.isRanked) {
+      results = db.processMatchResult(winnerIds, loserIds, lobby.id);
+    } else {
+      // Unranked - just create result structure without ELO changes
+      results = {
+        lobbyId: lobby.id,
+        isRanked: false,
+        winners: lobby.teams[winnerTeam].map(p => ({
+          odiscordId: p.odiscordId,
+          username: p.username,
+          oldElo: p.elo,
+          newElo: p.elo,
+          change: 0
+        })),
+        losers: lobby.teams[winnerTeam === 'team1' ? 'team2' : 'team1'].map(p => ({
+          odiscordId: p.odiscordId,
+          username: p.username,
+          oldElo: p.elo,
+          newElo: p.elo,
+          change: 0
+        }))
+      };
+    }
     
     // Add stats and class to results for display
     for (const player of results.winners) {
@@ -2103,17 +2330,23 @@ io.on('connection', (socket) => {
       player.class = playerClasses[player.odiscordId] || null;
     }
     
-    // NOW save the match with stats included
+    // Add team colors to results
+    results.team1Color = lobby.team1Color;
+    results.team2Color = lobby.team2Color;
+    
+    // Save the match with stats included
     db.saveMatch(results);
     
     lobby.eloResults = results;
 
-    // Update rank roles
-    for (const player of [...results.winners, ...results.losers]) {
-      const newRank = db.getRank(player.newElo);
-      const oldRank = db.getRank(player.oldElo);
-      if (newRank !== oldRank) {
-        updatePlayerRankRole(player.odiscordId, newRank);
+    // Update rank roles (only if ranked)
+    if (lobby.isRanked) {
+      for (const player of [...results.winners, ...results.losers]) {
+        const newRank = db.getRank(player.newElo);
+        const oldRank = db.getRank(player.oldElo);
+        if (newRank !== oldRank) {
+          updatePlayerRankRole(player.odiscordId, newRank);
+        }
       }
     }
 
@@ -2213,6 +2446,141 @@ io.on('connection', (socket) => {
     io.to(lobbyId).emit('playerKicked', { odiscordId });
     io.to(lobbyId).emit('lobbyUpdate', lobby);
     io.emit('lobbiesUpdate', getPublicLobbies());
+  });
+
+  // Whitelist a player (prevents them from being purged)
+  socket.on('whitelistPlayer', ({ lobbyId, odiscordId }) => {
+    const lobby = getLobby(lobbyId);
+    if (!lobby) return;
+    
+    if (socket.odiscordId !== lobby.host.odiscordId) {
+      socket.emit('error', { message: 'Only host can whitelist players' });
+      return;
+    }
+    
+    if (!lobby.whitelist.includes(odiscordId)) {
+      lobby.whitelist.push(odiscordId);
+    }
+    
+    io.to(lobbyId).emit('lobbyUpdate', lobby);
+  });
+
+  // Remove from whitelist
+  socket.on('unwhitelistPlayer', ({ lobbyId, odiscordId }) => {
+    const lobby = getLobby(lobbyId);
+    if (!lobby) return;
+    
+    if (socket.odiscordId !== lobby.host.odiscordId) {
+      socket.emit('error', { message: 'Only host can unwhitelist players' });
+      return;
+    }
+    
+    // Can't unwhitelist the host
+    if (odiscordId === lobby.host.odiscordId) {
+      return;
+    }
+    
+    lobby.whitelist = lobby.whitelist.filter(id => id !== odiscordId);
+    io.to(lobbyId).emit('lobbyUpdate', lobby);
+  });
+
+  // Ban a player from the lobby
+  // Timeout a player globally (like Discord timeout)
+  socket.on('timeoutPlayer', async ({ odiscordId, duration, reason }) => {
+    // Check if user has host role
+    const canTimeout = await userCanHostPublic(socket.odiscordId);
+    if (!canTimeout) {
+      socket.emit('error', { message: 'Only hosts with the host role can timeout players' });
+      return;
+    }
+    
+    if (odiscordId === socket.odiscordId) {
+      socket.emit('error', { message: 'Cannot timeout yourself' });
+      return;
+    }
+    
+    // Duration in minutes, default 30 mins, max 24 hours
+    const mins = Math.min(Math.max(duration || 30, 1), 1440);
+    const until = Date.now() + (mins * 60 * 1000);
+    
+    globalTimeouts.set(odiscordId, {
+      until,
+      reason: reason || 'No reason given',
+      bannedBy: socket.odiscordId
+    });
+    
+    // Kick them from any lobby they're in
+    for (const [code, lobby] of lobbies) {
+      if (lobby.players.some(p => p.odiscordId === odiscordId)) {
+        lobby.players = lobby.players.filter(p => p.odiscordId !== odiscordId);
+        lobby.whitelist = lobby.whitelist.filter(id => id !== odiscordId);
+        db.clearUserSession(odiscordId);
+        io.to(code).emit('playerKicked', { odiscordId, reason: `Timed out for ${mins} minutes: ${reason || 'No reason given'}` });
+        io.to(code).emit('lobbyUpdate', lobby);
+      }
+    }
+    
+    socket.emit('timeoutSuccess', { odiscordId, until, mins });
+    io.emit('lobbiesUpdate', getPublicLobbies());
+    console.log(`Player ${odiscordId} timed out for ${mins} minutes by ${socket.odiscordId}`);
+  });
+
+  // Remove a player's timeout
+  socket.on('removeTimeout', async ({ odiscordId }) => {
+    const canTimeout = await userCanHostPublic(socket.odiscordId);
+    if (!canTimeout) {
+      socket.emit('error', { message: 'Only hosts with the host role can remove timeouts' });
+      return;
+    }
+    
+    if (globalTimeouts.has(odiscordId)) {
+      globalTimeouts.delete(odiscordId);
+      socket.emit('timeoutRemoved', { odiscordId });
+      console.log(`Timeout removed for ${odiscordId} by ${socket.odiscordId}`);
+    }
+  });
+
+  // Get list of timed out players
+  socket.on('getTimeouts', async () => {
+    const canTimeout = await userCanHostPublic(socket.odiscordId);
+    if (!canTimeout) {
+      socket.emit('timeoutsList', { timeouts: [] });
+      return;
+    }
+    
+    const now = Date.now();
+    const timeouts = [];
+    
+    for (const [odiscordId, data] of globalTimeouts) {
+      if (data.until > now) {
+        timeouts.push({
+          odiscordId,
+          until: data.until,
+          reason: data.reason,
+          remainingMins: Math.ceil((data.until - now) / 60000)
+        });
+      } else {
+        globalTimeouts.delete(odiscordId);
+      }
+    }
+    
+    socket.emit('timeoutsList', { timeouts });
+  });
+
+  // Set team colors
+  socket.on('setTeamColors', ({ lobbyId, team1Color, team2Color }) => {
+    const lobby = getLobby(lobbyId);
+    if (!lobby) return;
+    
+    if (socket.odiscordId !== lobby.host.odiscordId) {
+      socket.emit('error', { message: 'Only host can change team colors' });
+      return;
+    }
+    
+    if (team1Color !== undefined) lobby.team1Color = team1Color;
+    if (team2Color !== undefined) lobby.team2Color = team2Color;
+    
+    io.to(lobbyId).emit('lobbyUpdate', lobby);
   });
 
   socket.on('closeLobby', async ({ lobbyId }) => {

@@ -70,5 +70,20 @@ module.exports = {
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
 
   // Backend URL (for generating image URLs)
-  BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3001'
+  BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3001',
+
+  // Role required to host public lobbies (with ELO)
+  PUBLIC_HOST_ROLE_ID: process.env.PUBLIC_HOST_ROLE_ID || '1468766786416676971',
+
+  // Team colors mapping
+  TEAM_COLORS: {
+    0: { name: 'white', hex: '#ffffff', tailwind: 'gray' },
+    1: { name: 'blue', hex: '#3b82f6', tailwind: 'blue' },
+    2: { name: 'purple', hex: '#a855f7', tailwind: 'purple' },
+    3: { name: 'green', hex: '#22c55e', tailwind: 'green' },
+    4: { name: 'yellow', hex: '#eab308', tailwind: 'yellow' },
+    5: { name: 'red', hex: '#ef4444', tailwind: 'red' },
+    6: { name: 'pink', hex: '#ec4899', tailwind: 'pink' },
+    7: { name: 'orange', hex: '#f97316', tailwind: 'orange' }
+  }
 };
