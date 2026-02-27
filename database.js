@@ -90,6 +90,11 @@ function unlinkMinecraft(odiscordId) {
   return false;
 }
 
+function getAllMinecraftLinks() {
+  const links = loadLinks();
+  return links.byDiscord || {};
+}
+
 // ===========================================
 // SESSIONS
 // ===========================================
@@ -230,6 +235,9 @@ function getPlayer(odiscordId) {
 function getOrCreatePlayer(odiscordId, username, avatar) {
   const db = loadDatabase();
   
+  // Get MC link if exists
+  const mcLink = getMinecraftByDiscord(odiscordId);
+  
   if (!db[odiscordId]) {
     db[odiscordId] = {
       odiscordId,
@@ -277,6 +285,12 @@ function getOrCreatePlayer(odiscordId, username, avatar) {
   player.kdr = player.totalDeaths > 0 
     ? (player.totalKills / player.totalDeaths).toFixed(2) 
     : (player.totalKills || 0).toFixed(2);
+  
+  // Attach MC data if linked
+  if (mcLink) {
+    player.minecraftUuid = mcLink.uuid;
+    player.minecraftUsername = mcLink.username;
+  }
   
   return player;
 }
@@ -457,5 +471,6 @@ module.exports = {
   linkMinecraft,
   getMinecraftByDiscord,
   getDiscordByMinecraft,
-  unlinkMinecraft
+  unlinkMinecraft,
+  getAllMinecraftLinks
 };
