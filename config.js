@@ -78,12 +78,16 @@ module.exports = {
   // Team colors mapping
   TEAM_COLORS: {
     0: { name: 'white', hex: '#ffffff', tailwind: 'gray' },
-    1: { name: 'blue', hex: '#3b82f6', tailwind: 'blue' },
+    1: { name: 'blue', hex: '#0d52ad', tailwind: 'blue' },  // Counterpush blue
     2: { name: 'purple', hex: '#a855f7', tailwind: 'purple' },
-    3: { name: 'green', hex: '#22c55e', tailwind: 'green' },
+    3: { name: 'green', hex: '#9ced23', tailwind: 'green' },  // Counterpush green
     4: { name: 'yellow', hex: '#eab308', tailwind: 'yellow' },
     5: { name: 'red', hex: '#ef4444', tailwind: 'red' },
     6: { name: 'pink', hex: '#ec4899', tailwind: 'pink' },
     7: { name: 'orange', hex: '#f97316', tailwind: 'orange' }
-  }
+  },
+
+  // Default team colors (green and blue - Counterpush brand colors)
+  DEFAULT_TEAM1_COLOR: 3,  // green
+  DEFAULT_TEAM2_COLOR: 1   // blue
 };

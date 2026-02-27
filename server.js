@@ -824,8 +824,8 @@ async function createLobby(hostId, hostData, maxPlayers, isPublic = false, isRan
     team1VCId: null,
     team2VCId: null,
     whitelist: [hostId], // Host is always whitelisted
-    team1Color: 1, // Default blue
-    team2Color: 5, // Default red
+    team1Color: CONFIG.DEFAULT_TEAM1_COLOR || 3, // Default green
+    team2Color: CONFIG.DEFAULT_TEAM2_COLOR || 1, // Default blue
     createdAt: Date.now()
   };
 
@@ -996,6 +996,127 @@ app.post('/api/admin/migrate', async (req, res) => {
   } catch (error) {
     console.error('Migration error:', error);
     res.status(500).json({ error: 'Migration failed', details: error.message });
+  }
+});
+
+// Admin CSV import endpoint - import stats from Player_Stats.csv format
+// POST /api/admin/import-csv?key=YOUR_SECRET_KEY
+// Body: CSV content or JSON array of rows
+app.post('/api/admin/import-csv', async (req, res) => {
+  const secretKey = req.query.key;
+  
+  if (secretKey !== 'counterpush-backup-2024') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  try {
+    const { rows } = req.body; // Expecting JSON array of parsed CSV rows
+    
+    if (!rows || !Array.isArray(rows)) {
+      return res.status(400).json({ error: 'Expected { rows: [...] } with CSV data' });
+    }
+    
+    // Group by player
+    const playerData = {};
+    rows.forEach(row => {
+      const playerName = row.Player;
+      if (!playerName) return;
+      
+      if (!playerData[playerName]) {
+        playerData[playerName] = {};
+      }
+      playerData[playerName][row.Category] = row;
+    });
+    
+    // Get MC links to map usernames to Discord IDs
+    const mcLinks = db.getAllMinecraftLinks();
+    const mcToDiscord = {};
+    Object.entries(mcLinks).forEach(([discordId, data]) => {
+      if (data.username) {
+        mcToDiscord[data.username.toLowerCase()] = discordId;
+      }
+    });
+    
+    let imported = 0;
+    let skipped = 0;
+    const notLinked = [];
+    
+    Object.entries(playerData).forEach(([mcUsername, categories]) => {
+      const allStats = categories['All Stats'];
+      if (!allStats) {
+        skipped++;
+        return;
+      }
+      
+      // Try to find Discord ID from MC link
+      let discordId = mcToDiscord[mcUsername.toLowerCase()];
+      
+      if (!discordId) {
+        notLinked.push(mcUsername);
+        discordId = `mc_${mcUsername.toLowerCase()}`; // Placeholder
+      }
+      
+      const elo = parseInt(allStats.ELO) || 500;
+      const wins = parseInt(allStats.Wins) || 0;
+      const losses = parseInt(allStats.Losses) || 0;
+      const gamesPlayed = parseInt(allStats['Games Played']) || 0;
+      
+      // Build class stats
+      const classStats = {};
+      ['Tank', 'Brawler', 'Sniper', 'Trickster', 'Support'].forEach(cls => {
+        const clsData = categories[`${cls} Stats`];
+        if (clsData && parseInt(clsData['Games Played']) > 0) {
+          classStats[cls] = {
+            kills: parseInt(clsData.Kills) || 0,
+            deaths: parseInt(clsData.Deaths) || 0,
+            assists: parseInt(clsData.Assists) || 0,
+            damage: parseInt(clsData.Damage) || 0,
+            healing: parseInt(clsData.Healing) || 0,
+            gamesPlayed: parseInt(clsData['Games Played']) || 0,
+            wins: parseInt(clsData.Wins) || 0
+          };
+        }
+      });
+      
+      // Get or create player
+      const existingPlayer = db.getPlayer(discordId) || {};
+      
+      db.updatePlayer(discordId, {
+        odiscordId: discordId,
+        username: existingPlayer.username || mcUsername,
+        avatar: existingPlayer.avatar || null,
+        elo: elo,
+        rank: db.getRank(elo),
+        gamesPlayed: gamesPlayed,
+        wins: wins,
+        losses: losses,
+        totalKills: parseInt(allStats.Kills) || 0,
+        totalDeaths: parseInt(allStats.Deaths) || 0,
+        totalAssists: parseInt(allStats.Assists) || 0,
+        totalDamage: parseInt(allStats.Damage) || 0,
+        totalHealing: parseInt(allStats.Healing) || 0,
+        classStats: classStats,
+        minecraftUsername: mcUsername,
+        importedFrom: 'csv',
+        importedAt: new Date().toISOString()
+      });
+      
+      imported++;
+    });
+    
+    console.log(`[ADMIN] CSV Import: ${imported} players imported, ${skipped} skipped, ${notLinked.length} not linked`);
+    
+    res.json({ 
+      success: true, 
+      imported, 
+      skipped, 
+      notLinked,
+      message: `Imported ${imported} players`
+    });
+    
+  } catch (error) {
+    console.error('CSV Import error:', error);
+    res.status(500).json({ error: 'Import failed', details: error.message });
   }
 });
 
