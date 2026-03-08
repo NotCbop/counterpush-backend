@@ -18,12 +18,12 @@ module.exports = {
   // Minecraft Servers (for fetching stats)
   // Add all your server URLs here
   MINECRAFT_SERVERS: [
-    process.env.MINECRAFT_SERVER_1 || 'http://161.129.71.34:25705',
-    process.env.MINECRAFT_SERVER_2 || 'http://161.129.71.34:25591'
+    process.env.MINECRAFT_SERVER_1 || 'http://64.20.51.42:25737',
+    process.env.MINECRAFT_SERVER_2 || 'http://64.20.51.42:25828'
   ],
   
   // Legacy single server support (deprecated, use MINECRAFT_SERVERS instead)
-  MINECRAFT_STATS_URL: process.env.MINECRAFT_STATS_URL || 'http://161.129.71.34:25705',
+  MINECRAFT_STATS_URL: process.env.MINECRAFT_STATS_URL || 'http://64.20.51.42:25737',
 
   // ELO K-Factor (doubled for faster ranking)
   K_FACTOR: 64,
