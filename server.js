@@ -1923,51 +1923,41 @@ io.on('connection', (socket) => {
     const toEliminate = lobby.players.length - lobby.maxPlayers;
     const eliminated = [];
     
-    const now = Date.now();
-    const FIVE_HOURS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
+    console.log(`[PURGE] Starting purge in lobby ${lobby.id}`);
+    console.log(`[PURGE] Players: ${lobby.players.length}, Max: ${lobby.maxPlayers}, To eliminate: ${toEliminate}`);
     
-    // Check for daily immunity (first game of day - 5 hour cooldown)
-    const dailyImmunePlayers = lobby.players.filter(p => {
-      const immuneUntil = dailyImmunity.get(p.odiscordId);
-      // If no entry or expired, they have daily immunity
-      return !immuneUntil || immuneUntil < now;
-    });
-    
-    // Don't eliminate the host OR players with purge immunity OR players with daily immunity OR whitelisted players
+    // Get immune players (purge immunity from being purged before)
     const immunePlayers = lobby.players.filter(p => purgeImmunity.has(p.odiscordId));
-    const whitelistedPlayers = lobby.players.filter(p => lobby.whitelist && lobby.whitelist.includes(p.odiscordId));
-    const allImmunePlayers = lobby.players.filter(p => 
-      purgeImmunity.has(p.odiscordId) || dailyImmunePlayers.includes(p)
+    
+    // Get whitelisted players
+    const whitelistedPlayers = lobby.players.filter(p => 
+      lobby.whitelist && lobby.whitelist.includes(p.odiscordId)
     );
     
+    // Players that CAN be eliminated (not host, not immune, not whitelisted)
     const eliminatablePlayers = lobby.players.filter(p => 
       p.odiscordId !== lobby.host.odiscordId && 
       !purgeImmunity.has(p.odiscordId) &&
-      !dailyImmunePlayers.includes(p) &&
       !(lobby.whitelist && lobby.whitelist.includes(p.odiscordId))
     );
     
-    // Clear purge immunity for players who used it
+    console.log(`[PURGE] Host: ${lobby.host.username}`);
+    console.log(`[PURGE] Immune players: ${immunePlayers.map(p => p.username).join(', ') || 'none'}`);
+    console.log(`[PURGE] Whitelisted: ${whitelistedPlayers.map(p => p.username).join(', ') || 'none'}`);
+    console.log(`[PURGE] Eliminatable: ${eliminatablePlayers.map(p => p.username).join(', ') || 'none'}`);
+    
+    // Clear purge immunity for players who used it (they survived because of it)
     immunePlayers.forEach(p => {
       purgeImmunity.delete(p.odiscordId);
-      console.log(`${p.username} used their purge immunity`);
+      console.log(`[PURGE] ${p.username} used their purge immunity`);
     });
     
-    // Set daily immunity cooldown for players who used it (5 hour cooldown)
-    dailyImmunePlayers.forEach(p => {
-      dailyImmunity.set(p.odiscordId, now + FIVE_HOURS);
-      console.log(`${p.username} used their first-game immunity (next available in 5 hours)`);
-    });
-    
-    // Notify immune players (combine both types)
+    // Notify immune players
     const immuneNotifications = [];
     immunePlayers.forEach(p => {
       immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'purge' });
     });
-    dailyImmunePlayers.filter(p => !immunePlayers.some(ip => ip.odiscordId === p.odiscordId)).forEach(p => {
-      immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'daily' });
-    });
-    whitelistedPlayers.filter(p => !immuneNotifications.some(n => n.odiscordId === p.odiscordId)).forEach(p => {
+    whitelistedPlayers.filter(p => !immunePlayers.some(ip => ip.odiscordId === p.odiscordId)).forEach(p => {
       immuneNotifications.push({ odiscordId: p.odiscordId, username: p.username, type: 'whitelist' });
     });
     
@@ -1975,8 +1965,12 @@ io.on('connection', (socket) => {
       io.to(lobby.id).emit('immunityUsed', { players: immuneNotifications });
     }
     
+    // Eliminate random players
     for (let i = 0; i < toEliminate; i++) {
-      if (eliminatablePlayers.length === 0) break;
+      if (eliminatablePlayers.length === 0) {
+        console.log(`[PURGE] No more eliminatable players!`);
+        break;
+      }
       
       const randomIndex = Math.floor(Math.random() * eliminatablePlayers.length);
       const player = eliminatablePlayers.splice(randomIndex, 1)[0];
@@ -1988,10 +1982,11 @@ io.on('connection', (socket) => {
       
       // Grant purge immunity for next lobby
       purgeImmunity.add(player.odiscordId);
-      console.log(`${player.username} was purged and granted immunity for next lobby`);
+      console.log(`[PURGE] ${player.username} was purged and granted immunity for next lobby`);
     }
     
     lobby.purgeData.eliminated = eliminated;
+    console.log(`[PURGE] Eliminated ${eliminated.length} players: ${eliminated.map(p => p.username).join(', ')}`);
     
     // Get lobby VC IDs for checking
     const lobbyVCId = lobby.lobbyVCId;
