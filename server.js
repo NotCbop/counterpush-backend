@@ -806,6 +806,9 @@ async function createLobby(hostId, hostData, maxPlayers, isPublic = false, isRan
   } while (lobbies.has(code));
 
   const hostPlayer = db.getOrCreatePlayer(hostId, hostData.username, hostData.avatar);
+  
+  // Add immunity status
+  hostPlayer.hasPurgeImmunity = purgeImmunity.has(hostId);
 
   const lobby = {
     id: code,
@@ -1820,6 +1823,10 @@ io.on('connection', (socket) => {
 
     // No max player limit - purge will handle overflow
     const player = db.getOrCreatePlayer(userData.odiscordId, userData.username, userData.avatar);
+    
+    // Add immunity status
+    player.hasPurgeImmunity = purgeImmunity.has(userData.odiscordId);
+    
     lobby.players.push(player);
     
     db.setUserSession(userData.odiscordId, lobby.id);
