@@ -571,6 +571,50 @@ async function getPlayersInLobbyVC(lobby) {
 }
 
 // ===========================================
+// HELPER: Delete team voice channels
+// ===========================================
+
+async function deleteTeamVoiceChannels(lobby) {
+  if (!discordClient.isReady()) return;
+  
+  try {
+    const guild = discordClient.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    
+    // Delete team 1 VC
+    if (lobby.team1VCId) {
+      const vc1 = guild.channels.cache.get(lobby.team1VCId);
+      if (vc1) {
+        await vc1.delete().catch(e => console.error('Error deleting team 1 VC:', e));
+      }
+      lobby.team1VCId = null;
+    }
+    
+    // Delete team 2 VC
+    if (lobby.team2VCId) {
+      const vc2 = guild.channels.cache.get(lobby.team2VCId);
+      if (vc2) {
+        await vc2.delete().catch(e => console.error('Error deleting team 2 VC:', e));
+      }
+      lobby.team2VCId = null;
+    }
+    
+    // Delete lobby VC
+    if (lobby.lobbyVCId) {
+      const lobbyVC = guild.channels.cache.get(lobby.lobbyVCId);
+      if (lobbyVC) {
+        await lobbyVC.delete().catch(e => console.error('Error deleting lobby VC:', e));
+      }
+      lobby.lobbyVCId = null;
+    }
+    
+    console.log(`Deleted voice channels for lobby ${lobby.id}`);
+  } catch (e) {
+    console.error('Error deleting team voice channels:', e);
+  }
+}
+
+// ===========================================
 // HELPER: Move players to team VCs
 // ===========================================
 
